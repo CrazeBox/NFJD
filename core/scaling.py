@@ -63,12 +63,46 @@ class StochasticGramianSolver:
         return direction, indices
 
 
+def compute_avg_cosine_sim(jacobian: torch.Tensor) -> float:
+    m = jacobian.shape[0]
+    if m <= 1:
+        return 1.0
+    norms = torch.norm(jacobian, p=2, dim=1, keepdim=True).clamp(min=1e-8)
+    normalized = jacobian / norms
+    sim_matrix = normalized @ normalized.T
+    mask = ~torch.eye(m, dtype=torch.bool, device=jacobian.device)
+    avg_sim = float(sim_matrix[mask].mean().item())
+    return max(-1.0, min(1.0, avg_sim))
+
+
+class ConflictAwareMomentum:
+    def __init__(self, base_beta: float = 0.9, min_beta: float = 0.1):
+        self.base_beta = base_beta
+        self.min_beta = min_beta
+        self.last_avg_cosine_sim: float = 0.0
+        self.last_effective_beta: float = base_beta
+
+    def compute_beta(self, avg_cosine_sim: float) -> float:
+        effective_beta = self.base_beta * (1.0 - avg_cosine_sim)
+        effective_beta = max(effective_beta, self.min_beta)
+        self.last_avg_cosine_sim = avg_cosine_sim
+        self.last_effective_beta = effective_beta
+        return effective_beta
+
+
 class LocalMomentum:
-    def __init__(self, beta: float = 0.9):
+    def __init__(self, beta: float = 0.9, conflict_aware: bool = False, min_beta: float = 0.1):
+        self.base_beta = beta
         self.beta = beta
         self.velocity: torch.Tensor | None = None
+        self.conflict_aware = conflict_aware
+        self.conflict_module = ConflictAwareMomentum(base_beta=beta, min_beta=min_beta) if conflict_aware else None
 
-    def update(self, direction: torch.Tensor) -> torch.Tensor:
+    def update(self, direction: torch.Tensor, jacobian: torch.Tensor | None = None) -> torch.Tensor:
+        if self.conflict_aware and self.conflict_module is not None and jacobian is not None:
+            avg_sim = compute_avg_cosine_sim(jacobian)
+            self.beta = self.conflict_module.compute_beta(avg_sim)
+
         if self.velocity is None:
             self.velocity = direction.clone()
         else:
@@ -80,11 +114,17 @@ class LocalMomentum:
 
 
 class GlobalMomentum:
-    def __init__(self, beta: float = 0.9):
+    def __init__(self, beta: float = 0.9, conflict_aware: bool = False, min_beta: float = 0.1):
+        self.base_beta = beta
         self.beta = beta
         self.velocity: torch.Tensor | None = None
+        self.conflict_aware = conflict_aware
+        self.conflict_module = ConflictAwareMomentum(base_beta=beta, min_beta=min_beta) if conflict_aware else None
 
-    def update(self, aggregated_delta: torch.Tensor) -> torch.Tensor:
+    def update(self, aggregated_delta: torch.Tensor, avg_cosine_sim: float | None = None) -> torch.Tensor:
+        if self.conflict_aware and self.conflict_module is not None and avg_cosine_sim is not None:
+            self.beta = self.conflict_module.compute_beta(avg_cosine_sim)
+
         if self.velocity is None:
             self.velocity = aggregated_delta.clone()
         else:
@@ -95,4 +135,7 @@ class GlobalMomentum:
         self.velocity = None
 
 
-__all__ = ["AdaptiveRescaling", "StochasticGramianSolver", "LocalMomentum", "GlobalMomentum"]
+__all__ = [
+    "AdaptiveRescaling", "StochasticGramianSolver", "LocalMomentum", "GlobalMomentum",
+    "ConflictAwareMomentum", "compute_avg_cosine_sim",
+]

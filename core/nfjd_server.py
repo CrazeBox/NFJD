@@ -30,6 +30,8 @@ class RoundStats:
     update_time: float = 0.0
     avg_rescale_factor: float = 1.0
     avg_local_epochs: int = 0
+    avg_cosine_sim: float = 0.0
+    effective_global_beta: float = 0.9
     method_name: str = "nfjd"
 
 
@@ -43,6 +45,8 @@ class NFJDServer:
         learning_rate: float,
         device: torch.device,
         global_momentum_beta: float = 0.9,
+        conflict_aware_momentum: bool = False,
+        momentum_min_beta: float = 0.1,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -50,7 +54,12 @@ class NFJDServer:
         self.participation_rate = participation_rate
         self.learning_rate = learning_rate
         self.device = device
-        self.global_momentum = GlobalMomentum(beta=global_momentum_beta)
+        self.global_momentum = GlobalMomentum(
+            beta=global_momentum_beta,
+            conflict_aware=conflict_aware_momentum,
+            min_beta=momentum_min_beta,
+        )
+        self.conflict_aware_momentum = conflict_aware_momentum
 
     def sample_clients(self) -> list[NFJDClient]:
         sample_size = max(int(len(self.clients) * self.participation_rate), 1)
@@ -96,6 +105,7 @@ class NFJDServer:
         total_upload = 0
         rescale_factors = []
         local_epochs_list = []
+        cosine_sims = []
 
         for client in sampled_clients:
             result = client.local_update(self._clone_model(), self.objective_fn)
@@ -105,6 +115,7 @@ class NFJDServer:
             total_upload += result.delta_theta.numel() * result.delta_theta.element_size()
             rescale_factors.append(result.rescale_factor)
             local_epochs_list.append(result.num_local_epochs)
+            cosine_sims.append(result.avg_cosine_sim)
 
         client_compute_time = time.time() - client_start
 
@@ -112,7 +123,13 @@ class NFJDServer:
         aggregated_delta = sum(dt for dt, _ in delta_thetas)
         aggregation_time = time.time() - agg_start
 
-        momentum_delta = self.global_momentum.update(aggregated_delta)
+        avg_cosine_sim = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
+        if self.conflict_aware_momentum:
+            momentum_delta = self.global_momentum.update(aggregated_delta, avg_cosine_sim=avg_cosine_sim)
+        else:
+            momentum_delta = self.global_momentum.update(aggregated_delta)
+
+        effective_beta = self.global_momentum.beta
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
@@ -141,5 +158,7 @@ class NFJDServer:
             update_time=update_time,
             avg_rescale_factor=avg_rescale,
             avg_local_epochs=avg_local_epochs,
+            avg_cosine_sim=avg_cosine_sim,
+            effective_global_beta=effective_beta,
             method_name="nfjd",
         )

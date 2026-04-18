@@ -10,7 +10,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from fedjd.aggregators import MinNormAggregator
-from fedjd.core.scaling import AdaptiveRescaling, LocalMomentum, StochasticGramianSolver
+from fedjd.core.scaling import AdaptiveRescaling, LocalMomentum, StochasticGramianSolver, compute_avg_cosine_sim
 
 ObjectiveFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], list[torch.Tensor]]
 
@@ -47,6 +47,7 @@ class ClientResult:
     final_lambda: torch.Tensor | None = None
     rescale_factor: float = 1.0
     sampled_indices: list[int] | None = None
+    avg_cosine_sim: float = 0.0
 
 
 class NFJDClient:
@@ -66,6 +67,8 @@ class NFJDClient:
         rescaling_max_scale: float = 10.0,
         minnorm_max_iters: int = 250,
         minnorm_lr: float = 0.1,
+        conflict_aware_momentum: bool = False,
+        momentum_min_beta: float = 0.1,
     ) -> None:
         self.client_id = client_id
         self.dataset = dataset
@@ -77,7 +80,11 @@ class NFJDClient:
         self.minnorm_lr = minnorm_lr
 
         self.prev_lambda: torch.Tensor | None = None
-        self.local_momentum = LocalMomentum(beta=local_momentum_beta)
+        self.local_momentum = LocalMomentum(
+            beta=local_momentum_beta,
+            conflict_aware=conflict_aware_momentum,
+            min_beta=momentum_min_beta,
+        )
         self.adaptive_rescaling = AdaptiveRescaling(epsilon=1e-8, max_scale=rescaling_max_scale) if use_adaptive_rescaling else None
         self.stochastic_solver = StochasticGramianSolver(
             subset_size=stochastic_subset_size,
@@ -85,6 +92,7 @@ class NFJDClient:
             lr=minnorm_lr,
             seed=stochastic_seed,
         ) if use_stochastic_gramian else None
+        self.conflict_aware_momentum = conflict_aware_momentum
 
     @property
     def num_examples(self) -> int:
@@ -97,6 +105,7 @@ class NFJDClient:
         final_lambda = None
         rescale_factor = 1.0
         sampled_indices = None
+        avg_cosine_sim = 0.0
 
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -155,7 +164,11 @@ class NFJDClient:
                         lambdas = candidate
                     final_lambda = lambdas.detach().clone()
 
-                momentum_direction = self.local_momentum.update(direction)
+                if self.conflict_aware_momentum:
+                    avg_cosine_sim = compute_avg_cosine_sim(jacobian)
+                    momentum_direction = self.local_momentum.update(direction, jacobian=jacobian)
+                else:
+                    momentum_direction = self.local_momentum.update(direction)
 
                 current_flat = flatten_parameters(model.parameters())
                 current_flat = current_flat - self.learning_rate * momentum_direction
@@ -177,6 +190,7 @@ class NFJDClient:
             final_lambda=final_lambda,
             rescale_factor=rescale_factor,
             sampled_indices=sampled_indices,
+            avg_cosine_sim=avg_cosine_sim,
         )
 
     def evaluate_objectives(self, model: nn.Module, objective_fn: ObjectiveFn) -> list[float]:

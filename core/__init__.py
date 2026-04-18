@@ -3,13 +3,17 @@ from .client import ClientResult, FedJDClient, ObjectiveFn
 from .nfjd_client import NFJDClient, ClientResult as NFJDClientResult
 from .nfjd_server import NFJDServer, RoundStats as NFJDRoundStats
 from .nfjd_trainer import NFJDTrainer
-from .scaling import AdaptiveRescaling, GlobalMomentum, LocalMomentum, StochasticGramianSolver
+from .scaling import (
+    AdaptiveRescaling, ConflictAwareMomentum, GlobalMomentum, LocalMomentum,
+    StochasticGramianSolver, compute_avg_cosine_sim,
+)
 from .server import FedJDServer, RoundStats
 from .trainer import FedJDTrainer
 
 __all__ = [
     "AdaptiveRescaling",
     "ClientResult",
+    "ConflictAwareMomentum",
     "DirectionAvgServer",
     "FedJDClient",
     "FedJDServer",
@@ -26,4 +30,5 @@ __all__ = [
     "RoundStats",
     "StochasticGramianSolver",
     "WeightedSumServer",
+    "compute_avg_cosine_sim",
 ]
