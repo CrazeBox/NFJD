@@ -1,9 +1,3 @@
-from .run_experiment import run_single_experiment
-from .run_sweep import run_sweep
-from .analyze_results import analyze_sweep_results
-
-__all__ = [
-    "run_single_experiment",
-    "run_sweep",
-    "analyze_sweep_results",
-]
+from fedjd.experiments.s1_baseline.run_experiment import run_single_experiment
+from fedjd.experiments.s1_baseline.run_sweep import run_sweep
+from fedjd.experiments.s1_baseline.analyze_results import analyze_sweep_results
