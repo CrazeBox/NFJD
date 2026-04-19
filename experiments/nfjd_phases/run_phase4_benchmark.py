@@ -24,11 +24,13 @@ from fedjd.metrics import extract_pareto_front, hypervolume
 from fedjd.models import MODEL_REGISTRY, MultiTaskClassifier
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
-
 RESULTS_DIR = Path("e:/AIProject/results/nfjd_phase4")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                    handlers=[logging.FileHandler(RESULTS_DIR / "p4_run.log", mode="w"),
+                              logging.StreamHandler()])
+logger = logging.getLogger(__name__)
 
 ALL_FIELDNAMES = [
     "exp_id", "method", "task_type", "dataset", "m", "seed", "num_rounds",
@@ -38,84 +40,23 @@ ALL_FIELDNAMES = [
     "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
     "avg_relative_improvement", "avg_upload_bytes", "avg_round_time",
     "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
+    "total_local_steps", "fair_comparison",
 ]
 MAX_M = 10
 for i in range(MAX_M):
     ALL_FIELDNAMES.extend([f"init_obj_{i}", f"final_obj_{i}", f"delta_obj_{i}"])
 
 
-def _run_regression(method, m, seed, model_size, num_rounds=50,
-                    num_clients=10, participation_rate=0.5, learning_rate=0.01):
-    exp_id = f"P4-reg-{method}-m{m}-{model_size}-seed{seed}"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
-    random.seed(seed)
-
-    fed_data = make_synthetic_federated_regression(
-        num_clients=num_clients, samples_per_client=100, input_dim=8,
-        num_objectives=m, seed=seed)
-
-    model_cls = MODEL_REGISTRY[model_size]
-    model = model_cls(input_dim=fed_data.input_dim, output_dim=m)
-    objective_fn = multi_objective_regression
-
-    return _run_common(exp_id, method, model, fed_data.client_datasets,
-                       objective_fn, m, seed, device, num_rounds, num_clients,
-                       participation_rate, learning_rate, model_size,
-                       task_type="regression", dataset="synthetic_regression")
-
-
-def _run_highconflict(method, m, seed, conflict_strength=1.0, num_rounds=50,
-                      num_clients=10, participation_rate=0.5, learning_rate=0.01):
-    exp_id = f"P4-hc-{method}-m{m}-cs{conflict_strength}-seed{seed}"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
-    random.seed(seed)
-
-    fed_data = make_high_conflict_federated_regression(
-        num_clients=num_clients, samples_per_client=100, input_dim=8,
-        num_objectives=m, conflict_strength=conflict_strength, seed=seed)
-
-    model = MODEL_REGISTRY["small"](input_dim=fed_data.input_dim, output_dim=m)
-    objective_fn = multi_objective_regression
-
-    return _run_common(exp_id, method, model, fed_data.client_datasets,
-                       objective_fn, m, seed, device, num_rounds, num_clients,
-                       participation_rate, learning_rate, "small",
-                       task_type="highconflict", dataset=f"highconflict_cs{conflict_strength}",
-                       conflict_strength=conflict_strength)
-
-
-def _run_classification(method, m, seed, noniid_strength=0.0, num_rounds=50,
-                        num_clients=10, participation_rate=0.5, learning_rate=0.01):
-    exp_id = f"P4-cls-{method}-m{m}-niid{noniid_strength}-seed{seed}"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
-    random.seed(seed)
-
-    fed_data = make_federated_classification(
-        num_clients=num_clients, samples_per_client=128, input_dim=64,
-        num_classes=10, num_tasks=m, noniid_strength=noniid_strength, seed=seed)
-
-    model = MultiTaskClassifier(input_dim=fed_data.input_dim, hidden_dim=64,
-                                num_classes=fed_data.num_classes, num_tasks=m)
-    objective_fn = multi_task_classification
-
-    return _run_common(exp_id, method, model, fed_data.client_datasets,
-                       objective_fn, m, seed, device, num_rounds, num_clients,
-                       participation_rate, learning_rate, "classifier",
-                       task_type="classification", dataset=f"cls_niid{noniid_strength}",
-                       noniid_strength=noniid_strength)
-
-
 def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
                 device, num_rounds, num_clients, participation_rate, learning_rate,
                 model_size, task_type, dataset, conflict_strength=0.0,
-                noniid_strength=0.0):
+                noniid_strength=0.0, local_epochs_override=None,
+                fair_comparison=False):
 
     if method == "nfjd":
+        le = local_epochs_override if local_epochs_override else 3
         clients = [NFJDClient(client_id=i, dataset=client_datasets[i], batch_size=32,
-                              device=device, local_epochs=3, learning_rate=learning_rate,
+                              device=device, local_epochs=le, learning_rate=learning_rate,
                               local_momentum_beta=0.9, use_adaptive_rescaling=True,
                               use_stochastic_gramian=True, stochastic_subset_size=4,
                               stochastic_seed=seed, conflict_aware_momentum=False,
@@ -194,7 +135,8 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
         beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
         avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
 
-    local_epochs = 3 if method == "nfjd" else 1
+    local_epochs = local_epochs_override if local_epochs_override else (3 if method == "nfjd" else 1)
+    total_local_steps = local_epochs * num_rounds
 
     row = {
         "exp_id": exp_id, "method": method, "task_type": task_type,
@@ -215,6 +157,8 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine_sim, 4),
         "avg_effective_beta": round(avg_effective_beta, 4),
+        "total_local_steps": total_local_steps,
+        "fair_comparison": fair_comparison,
     }
     for i in range(MAX_M):
         if i < m:
@@ -226,8 +170,77 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
 
-    logger.info("[%s] %s: RI=%.4f NHV=%.4f time=%.1fs", exp_id, method, avg_ri, hv, elapsed)
+    logger.info("[%s] %s: RI=%.4f NHV=%.4f steps=%d time=%.1fs", exp_id, method, avg_ri, hv, total_local_steps, elapsed)
     return row
+
+
+def _run_regression(method, m, seed, model_size, num_rounds=50,
+                    num_clients=10, participation_rate=0.5, learning_rate=0.01,
+                    local_epochs_override=None, fair_comparison=False):
+    exp_id = f"P4-reg-{method}-m{m}-{model_size}-seed{seed}"
+    if fair_comparison:
+        exp_id = f"P4-fair-reg-{method}-m{m}-{model_size}-seed{seed}"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    fed_data = make_synthetic_federated_regression(
+        num_clients=num_clients, samples_per_client=100, input_dim=8,
+        num_objectives=m, seed=seed)
+
+    model_cls = MODEL_REGISTRY[model_size]
+    model = model_cls(input_dim=fed_data.input_dim, output_dim=m)
+    objective_fn = multi_objective_regression
+
+    return _run_common(exp_id, method, model, fed_data.client_datasets,
+                       objective_fn, m, seed, device, num_rounds, num_clients,
+                       participation_rate, learning_rate, model_size,
+                       task_type="regression", dataset="synthetic_regression",
+                       local_epochs_override=local_epochs_override,
+                       fair_comparison=fair_comparison)
+
+
+def _run_highconflict(method, m, seed, conflict_strength=1.0, num_rounds=50,
+                      num_clients=10, participation_rate=0.5, learning_rate=0.01):
+    exp_id = f"P4-hc-{method}-m{m}-cs{conflict_strength}-seed{seed}"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    fed_data = make_high_conflict_federated_regression(
+        num_clients=num_clients, samples_per_client=100, input_dim=8,
+        num_objectives=m, conflict_strength=conflict_strength, seed=seed)
+
+    model = MODEL_REGISTRY["small"](input_dim=fed_data.input_dim, output_dim=m)
+    objective_fn = multi_objective_regression
+
+    return _run_common(exp_id, method, model, fed_data.client_datasets,
+                       objective_fn, m, seed, device, num_rounds, num_clients,
+                       participation_rate, learning_rate, "small",
+                       task_type="highconflict", dataset=f"highconflict_cs{conflict_strength}",
+                       conflict_strength=conflict_strength)
+
+
+def _run_classification(method, m, seed, noniid_strength=0.0, num_rounds=50,
+                        num_clients=10, participation_rate=0.5, learning_rate=0.01):
+    exp_id = f"P4-cls-{method}-m{m}-niid{noniid_strength}-seed{seed}"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    fed_data = make_federated_classification(
+        num_clients=num_clients, samples_per_client=128, input_dim=64,
+        num_classes=10, num_tasks=m, noniid_strength=noniid_strength, seed=seed)
+
+    model = MultiTaskClassifier(input_dim=fed_data.input_dim, hidden_dim=64,
+                                num_classes=fed_data.num_classes, num_tasks=m)
+    objective_fn = multi_task_classification
+
+    return _run_common(exp_id, method, model, fed_data.client_datasets,
+                       objective_fn, m, seed, device, num_rounds, num_clients,
+                       participation_rate, learning_rate, "classifier",
+                       task_type="classification", dataset=f"cls_niid{noniid_strength}",
+                       noniid_strength=noniid_strength)
 
 
 def _write_csv(csv_path, rows):
@@ -268,13 +281,30 @@ def main():
                         type="classification", method=method, m=m, seed=seed,
                         noniid_strength=noniid))
 
+    FAIR_M = [2, 5]
+    FAIR_MODEL = "small"
+    for m in FAIR_M:
+        for method in METHODS:
+            for seed in SEEDS:
+                if method == "nfjd":
+                    experiments.append(dict(
+                        type="fair_regression", method=method, m=m, seed=seed,
+                        model_size=FAIR_MODEL, num_rounds=50,
+                        local_epochs_override=3, fair_comparison=True))
+                else:
+                    experiments.append(dict(
+                        type="fair_regression", method=method, m=m, seed=seed,
+                        model_size=FAIR_MODEL, num_rounds=150,
+                        local_epochs_override=1, fair_comparison=True))
+
     total = len(experiments)
     logger.info(f"Starting NFJD Phase 4 Full Benchmark: {total} experiments")
 
     reg_count = sum(1 for e in experiments if e["type"] == "regression")
     hc_count = sum(1 for e in experiments if e["type"] == "highconflict")
     cls_count = sum(1 for e in experiments if e["type"] == "classification")
-    logger.info(f"  Regression: {reg_count}, HighConflict: {hc_count}, Classification: {cls_count}")
+    fair_count = sum(1 for e in experiments if e["type"] == "fair_regression")
+    logger.info(f"  Regression: {reg_count}, HighConflict: {hc_count}, Classification: {cls_count}, FairComparison: {fair_count}")
 
     for idx, exp in enumerate(experiments):
         exp_type = exp.pop("type")
@@ -287,6 +317,8 @@ def main():
                 row = _run_highconflict(**exp)
             elif exp_type == "classification":
                 row = _run_classification(**exp)
+            elif exp_type == "fair_regression":
+                row = _run_regression(**exp)
             else:
                 raise ValueError(f"Unknown type: {exp_type}")
             all_rows.append(row)
