@@ -368,6 +368,7 @@ def _compute_dynamic_iters(m: int) -> int:
 ### Stage 1：基线验证
 - 验证NFJD核心链路正确性
 - 对比NFJD vs FedJD vs WeightedSum vs DirectionAvg
+- 在MultiMNIST和CelebA数据集上进行验证
 
 ### Stage 2：消融实验
 - AdaptiveRescaling消融
@@ -381,3 +382,5 @@ def _compute_dynamic_iters(m: int) -> int:
 
 ### Stage 4：完整基准
 - 多任务、多m值、Non-IID完整对比
+- 在CelebA数据集上测试不同属性数量（2-6个）的性能
+- 验证NFJD在图像多属性预测任务中的表现

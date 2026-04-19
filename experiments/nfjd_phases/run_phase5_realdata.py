@@ -18,9 +18,11 @@ from fedjd.core import (
 )
 from fedjd.data.multimnist import make_multimnist
 from fedjd.data.river_flow import make_river_flow
+from fedjd.data.celeba import make_celeba
 from fedjd.metrics import extract_pareto_front, hypervolume
 from fedjd.models.lenet_mtl import LeNetMTL
 from fedjd.models.river_flow_mlp import RiverFlowMLP
+from fedjd.models.celeba_cnn import CelebaCNN
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
 RESULTS_DIR = Path("results/nfjd_phase5")
@@ -165,6 +167,78 @@ def _run_riverflow(method, seed, iid=True, num_rounds=50,
             all_targets.append(by.cpu())
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
+    per_task_mse = []
+    for t in range(num_tasks):
+        mse = ((all_preds[:, t] - all_targets[:, t]) ** 2).mean().item()
+        per_task_mse.append(mse)
+    row["per_task_mse"] = ",".join(f"{v:.6f}" for v in per_task_mse)
+    row["avg_mse"] = round(sum(per_task_mse) / len(per_task_mse), 6)
+    row["max_mse"] = round(max(per_task_mse), 6)
+    import numpy as np
+    row["mse_std"] = round(float(np.std(per_task_mse)), 6)
+
+    return row
+
+
+def _run_celeba(method, seed, iid=True, num_rounds=50,
+                num_clients=10, participation_rate=0.5, learning_rate=0.0001,
+                num_tasks=4, fair_comparison=False):
+    split_name = "iid" if iid else "noniid"
+    exp_id = f"P5-ca-{method}-{split_name}-m{num_tasks}-seed{seed}"
+    if fair_comparison:
+        exp_id = f"P5-fair-ca-{method}-{split_name}-m{num_tasks}-seed{seed}"
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    # Create CelebA dataset
+    train_datasets, val_datasets, test_datasets = make_celeba(
+        num_clients=num_clients, iid=iid, seed=seed, num_tasks=num_tasks
+    )
+    
+    data = {
+        "client_datasets": train_datasets,
+        "test_dataset": torch.utils.data.ConcatDataset(test_datasets)
+    }
+    
+    model = CelebaCNN(num_attributes=num_tasks)
+    objective_fn = multi_objective_regression  # Use MSE for binary attributes
+
+    if method == "nfjd":
+        le = 3
+        nr = num_rounds
+    else:
+        le = 1
+        nr = num_rounds * 3 if fair_comparison else num_rounds
+
+    row = _run_common(
+        exp_id=exp_id, method=method, model=model,
+        client_datasets=data["client_datasets"],
+        objective_fn=objective_fn, m=num_tasks, seed=seed, device=device,
+        num_rounds=nr, num_clients=num_clients,
+        participation_rate=participation_rate, learning_rate=learning_rate,
+        model_arch="celeba_cnn", task_type="regression",
+        dataset="celeba", data_split=split_name,
+        local_epochs=le, fair_comparison=fair_comparison,
+    )
+
+    # Evaluate on test set
+    test_ds = data["test_dataset"]
+    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
+    model.eval()
+    all_preds, all_targets = [], []
+    with torch.no_grad():
+        for bx, by in test_loader:
+            bx = bx.to(device)
+            by = by.to(device)
+            pred = model(bx)
+            all_preds.append(pred.cpu())
+            all_targets.append(by.cpu())
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
+    
+    # Calculate MSE for each attribute
     per_task_mse = []
     for t in range(num_tasks):
         mse = ((all_preds[:, t] - all_targets[:, t]) ** 2).mean().item()
@@ -344,29 +418,23 @@ def main():
     for method in METHODS + ["stl"]:
         for seed in SEEDS:
             experiments.append(dict(
-                type="riverflow", method=method, seed=seed, iid=True, num_tasks=8))
+                type="celeba", method=method, seed=seed, iid=True, num_tasks=4))
 
     for method in METHODS:
         for seed in SEEDS:
             experiments.append(dict(
-                type="riverflow", method=method, seed=seed, iid=False, num_tasks=8))
+                type="celeba", method=method, seed=seed, iid=False, num_tasks=4))
 
-    for m in [2, 4, 8]:
+    for m in [2, 4, 6]:
         for method in ["nfjd", "fedjd"]:
             for seed in SEEDS:
                 experiments.append(dict(
-                    type="riverflow_scale", method=method, seed=seed, iid=True, num_tasks=m))
-
-    for subset in [4, 6, 8]:
-        for seed in SEEDS:
-            experiments.append(dict(
-                type="riverflow_sg", method="nfjd", seed=seed, iid=True,
-                num_tasks=8, stochastic_subset_size=subset))
+                    type="celeba_scale", method=method, seed=seed, iid=True, num_tasks=m))
 
     for method in METHODS:
         for seed in SEEDS:
             experiments.append(dict(
-                type="riverflow_fair", method=method, seed=seed, iid=True, num_tasks=8))
+                type="celeba_fair", method=method, seed=seed, iid=True, num_tasks=4))
 
     total = len(experiments)
     logger.info(f"Starting NFJD Phase 5 Real Data Benchmark: {total} experiments")
@@ -374,12 +442,11 @@ def main():
     mm_iid = sum(1 for e in experiments if e["type"] == "multimnist" and e.get("iid"))
     mm_niid = sum(1 for e in experiments if e["type"] == "multimnist" and not e.get("iid"))
     mm_fair = sum(1 for e in experiments if e["type"] == "multimnist_fair")
-    rf_base = sum(1 for e in experiments if e["type"] == "riverflow")
-    rf_scale = sum(1 for e in experiments if e["type"] == "riverflow_scale")
-    rf_sg = sum(1 for e in experiments if e["type"] == "riverflow_sg")
-    rf_fair = sum(1 for e in experiments if e["type"] == "riverflow_fair")
+    ca_base = sum(1 for e in experiments if e["type"] == "celeba")
+    ca_scale = sum(1 for e in experiments if e["type"] == "celeba_scale")
+    ca_fair = sum(1 for e in experiments if e["type"] == "celeba_fair")
     logger.info(f"  MultiMNIST IID: {mm_iid}, NonIID: {mm_niid}, Fair: {mm_fair}")
-    logger.info(f"  RiverFlow Base: {rf_base}, Scale: {rf_scale}, SG: {rf_sg}, Fair: {rf_fair}")
+    logger.info(f"  CelebA Base: {ca_base}, Scale: {ca_scale}, Fair: {ca_fair}")
 
     for idx, exp in enumerate(experiments):
         exp_type = exp.pop("type")
@@ -390,14 +457,12 @@ def main():
                 row = _run_multimnist(**exp)
             elif exp_type == "multimnist_fair":
                 row = _run_multimnist(**exp, fair_comparison=True)
-            elif exp_type == "riverflow":
-                row = _run_riverflow(**exp)
-            elif exp_type == "riverflow_scale":
-                row = _run_riverflow(**exp)
-            elif exp_type == "riverflow_sg":
-                row = _run_riverflow(**exp)
-            elif exp_type == "riverflow_fair":
-                row = _run_riverflow(**exp, fair_comparison=True)
+            elif exp_type == "celeba":
+                row = _run_celeba(**exp)
+            elif exp_type == "celeba_scale":
+                row = _run_celeba(**exp)
+            elif exp_type == "celeba_fair":
+                row = _run_celeba(**exp, fair_comparison=True)
             else:
                 raise ValueError(f"Unknown type: {exp_type}")
             all_rows.append(row)
