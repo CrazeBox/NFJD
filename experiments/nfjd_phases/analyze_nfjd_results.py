@@ -6,7 +6,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-RESULTS_DIR = Path("e:/AIProject/results/nfjd_benchmark")
+RESULTS_DIR = Path("results/nfjd_benchmark")
 
 
 def _sf(v, default=0.0):

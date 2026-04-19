@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-RESULTS_DIR = Path("e:/AIProject/results/s5_highconflict")
+RESULTS_DIR = Path("results/s5_highconflict")
 
 
 def _safe_float(v, default=0.0):

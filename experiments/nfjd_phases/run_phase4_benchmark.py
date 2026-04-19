@@ -24,7 +24,7 @@ from fedjd.metrics import extract_pareto_front, hypervolume
 from fedjd.models import MODEL_REGISTRY, MultiTaskClassifier
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
-RESULTS_DIR = Path("e:/AIProject/results/nfjd_phase4")
+RESULTS_DIR = Path("results/nfjd_phase4")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",

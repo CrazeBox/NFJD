@@ -30,7 +30,7 @@ from fedjd.problems.regression import multi_objective_regression
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = Path("e:/AIProject/results/s4_benchmark")
+RESULTS_DIR = Path("results/s4_benchmark")
 
 ALL_FIELDNAMES = [
     "exp_id", "method", "task", "m", "seed", "num_rounds", "num_clients",

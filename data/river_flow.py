@@ -9,6 +9,7 @@ from torch.utils.data import TensorDataset
 logger = logging.getLogger(__name__)
 
 RIVER_FLOW_DIR = Path("data/river_flow")
+RIVER_FLOW_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def make_river_flow(

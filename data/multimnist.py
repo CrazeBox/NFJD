@@ -10,6 +10,7 @@ from torch.utils.data import TensorDataset
 logger = logging.getLogger(__name__)
 
 MULTIMNIST_DIR = Path("data/multimnist")
+MULTIMNIST_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def make_multimnist(

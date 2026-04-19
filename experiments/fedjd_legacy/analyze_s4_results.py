@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-RESULTS_DIR = Path("e:/AIProject/results/s4_benchmark")
+RESULTS_DIR = Path("results/s4_benchmark")
 ANALYSIS_DIR = RESULTS_DIR / "analysis"
 
 

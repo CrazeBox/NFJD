@@ -21,7 +21,7 @@ from fedjd.problems import multi_objective_regression
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = Path("e:/AIProject/results/nfjd_phase2")
+RESULTS_DIR = Path("results/nfjd_phase2")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALL_FIELDNAMES = [

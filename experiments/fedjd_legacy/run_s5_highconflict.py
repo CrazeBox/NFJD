@@ -29,7 +29,7 @@ from fedjd.problems import multi_objective_regression
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = Path("e:/AIProject/results/s5_highconflict")
+RESULTS_DIR = Path("results/s5_highconflict")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALL_FIELDNAMES = [

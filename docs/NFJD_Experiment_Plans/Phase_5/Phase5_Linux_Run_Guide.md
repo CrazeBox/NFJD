@@ -63,8 +63,11 @@ mkdir -p data/river_flow
 # 激活环境
 conda activate nfjd
 
+# 确保在项目根目录
+cd /path/to/workspace/NFJD
+
 # 运行全部 Phase 5 实验（约 120 次，预计 4-8 小时）
-nohup python experiments/nfjd_phases/run_phase5_realdata.py > p5_stdout.log 2>&1 &
+nohup python -m experiments.nfjd_phases.run_phase5_realdata > p5_stdout.log 2>&1 &
 
 # 查看进度
 tail -f results/nfjd_phase5/p5_run.log
