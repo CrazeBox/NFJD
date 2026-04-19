@@ -12,13 +12,17 @@ class AdaptiveRescaling:
         self.epsilon = epsilon
         self.max_scale = max_scale
         self.last_scale = 1.0
+        self._cached_mean_grad_norm: torch.Tensor | None = None
+        self._cached_direction_norm: torch.Tensor | None = None
 
     def __call__(self, direction: torch.Tensor, jacobian: torch.Tensor) -> torch.Tensor:
         mean_grad = jacobian.mean(dim=0)
-        raw_norm = float(torch.norm(mean_grad, p=2).item())
-        direction_norm = float(torch.norm(direction, p=2).item()) + self.epsilon
-        scale = min(raw_norm / direction_norm, self.max_scale)
-        self.last_scale = scale
+        raw_norm = torch.norm(mean_grad, p=2)
+        direction_norm = torch.norm(direction, p=2) + self.epsilon
+        scale = torch.minimum(raw_norm / direction_norm, torch.tensor(self.max_scale, device=direction.device, dtype=direction.dtype))
+        self.last_scale = float(scale.item())
+        self._cached_mean_grad_norm = raw_norm
+        self._cached_direction_norm = direction_norm
         return direction * scale
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import time
@@ -19,7 +19,7 @@ from fedjd.data.synthetic import make_synthetic_federated_regression
 from fedjd.problems import multi_objective_regression
 from fedjd.models.small_regressor import SmallRegressor
 
-OUTPUT_FILE = Path(__file__).parent / "profile_result.txt"
+OUTPUT_FILE = Path("results/nfjd_tools/profile_result.txt")
 
 def log(msg):
     print(msg)
@@ -31,7 +31,7 @@ def profile_nfjd_client():
         OUTPUT_FILE.unlink()
     
     log("=" * 80)
-    log("NFJD 客户端耗时分解分析")
+    log("NFJD 客户端耗时分析")
     log("=" * 80)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,7 +46,7 @@ def profile_nfjd_client():
 
     model = SmallRegressor(input_dim=input_dim, output_dim=m).to(device)
     m_param = sum(p.numel() for p in model.parameters())
-    log(f"模型参数量: {m_param:,}")
+    log(f"模型参数数量: {m_param:,}")
 
     def objective_fn(pred, target, _):
         losses = []
@@ -156,13 +156,13 @@ def profile_nfjd_client():
 
     per_step = total_time / n_batches if n_batches > 0 else 0
     log(f"\n平均每步时间: {per_step:.4f}秒")
-    log(f"每轮(20步)预估时间: {20 * per_step:.2f}秒")
+    log(f"每轮(20步)预计时间: {20 * per_step:.2f}秒")
 
     return times
 
 def check_sync_points():
     log("\n\n" + "=" * 80)
-    log("隐式同步点检查")
+    log("异步同步点检查")
     log("=" * 80)
 
     sync_patterns = ['.item()', '.cpu()', '.numpy()', 'print(']
@@ -187,7 +187,7 @@ def check_sync_points():
         if count == 0:
             log("  无匹配")
         else:
-            log(f"  共 {count} 处")
+            log(f"  共{count} 处")
 
 if __name__ == "__main__":
     profile_nfjd_client()
@@ -196,3 +196,4 @@ if __name__ == "__main__":
     log("性能分析完成")
     log("=" * 80)
     log(f"\n结果文件: {OUTPUT_FILE}")
+

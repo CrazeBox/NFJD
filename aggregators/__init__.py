@@ -14,32 +14,31 @@ class JacobianAggregator(ABC):
 def _project_simplex(vector: torch.Tensor) -> torch.Tensor:
     """
     Project onto the probability simplex using fully vectorized operations.
-    
-    This implementation avoids Python loops and minimizes .item() calls 
+
+    This implementation avoids Python loops and minimizes .item() calls
     for maximum GPU performance, especially important for small dimensions
     (m<=10) where each .item() causes costly GPU-CPU synchronization.
+
+    Optimization: Uses tensor indexing instead of .item() to avoid
+    GPU-CPU synchronization overhead during projection.
     """
     n = vector.numel()
-    
+
     if n <= 1:
         return torch.clamp(vector, min=0.0)
-    
+
     sorted_v, _ = torch.sort(vector, descending=True)
     cumsum = torch.cumsum(sorted_v, dim=0)
     steps = torch.arange(1, n + 1, device=vector.device, dtype=vector.dtype)
     support = sorted_v - (cumsum - 1.0) / steps > 0
-    
-    # Find the largest k such that sorted_v[k] - t_candidates[k] > 0
-    # Using torch.argmax with indices to avoid per-iteration .item() overhead
+
     if support.any():
-        # Multiply by indices and find argmax to get the last True position
-        # This is still one .item() call per projection, but much faster than 250 calls
         support_indices = torch.nonzero(support, as_tuple=False)
-        rho = int(support_indices[-1].item())
-        theta = float((cumsum[rho] - 1.0) / (rho + 1))
+        rho = support_indices[-1, 0]
+        theta = (cumsum[rho] - 1.0) / (rho + 1.0)
     else:
         theta = 0.0
-    
+
     return torch.clamp(vector - theta, min=0.0)
 
 

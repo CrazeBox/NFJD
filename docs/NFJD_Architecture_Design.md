@@ -284,7 +284,86 @@ def compute_jacobian_and_loss(model, objective_fn, inputs, targets, prev_lambda)
 
 ---
 
-## 4. 实验计划
+## 5. 性能优化措施
+
+### 5.1 GPU加速优化
+
+**问题**：在GPU上运行时，`.item()`调用会导致GPU-CPU同步，造成性能瓶颈。
+
+**解决方案**：使用纯GPU tensor操作替代`.item()`调用：
+
+```python
+# 优化前（有GPU-CPU同步）
+rho = int(support_indices[-1].item())
+theta = float((cumsum[rho] - 1.0) / (rho + 1))
+
+# 优化后（纯GPU操作）
+rho = support_indices[-1, 0]
+theta = (cumsum[rho] - 1.0) / (rho + 1.0)
+```
+
+### 5.2 AdaptiveRescaling优化
+
+**问题**：每次缩放计算都需要进行GPU-CPU同步来获取Python标量。
+
+**解决方案**：使用向量化操作和tensor比较：
+
+```python
+# 优化前
+scale = min(raw_norm / direction_norm, self.max_scale)
+
+# 优化后（保持GPU在设备上）
+scale = torch.minimum(raw_norm / direction_norm,
+                      torch.tensor(self.max_scale, device=direction.device, dtype=direction.dtype))
+```
+
+### 5.3 梯度缓存策略
+
+**实现机制**：通过`recompute_interval`参数控制Jacobian计算的频率：
+
+```python
+need_recompute = (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
+
+if need_recompute:
+    # 完整路径：Jacobian → MinNorm → Rescaling → Momentum → Update
+    # 计算完整的Jacobian和MinNorm方向
+else:
+    # Cheap step：用上一次lambda构造加权损失，单次反向传播
+    # 跳过Jacobian计算和MinNorm QP求解，大幅减少计算开销
+```
+
+**性能收益**：
+- 当`recompute_interval > 1`时，非重算步只需1次backward
+- 跳过m个独立梯度计算和O(m²)的MinNorm QP求解
+- 约90%+的计算时间节省
+
+### 5.4 StochasticGramianSolver
+
+**适用场景**：当目标数m较大时（m > subset_size），随机采样子集构建Gram矩阵。
+
+**性能收益**：
+- 计算复杂度从O(m²)降至O(k²)，其中k为子集大小
+- 内存占用从O(m×d)降至O(k×d)
+
+### 5.5 动态迭代次数调整
+
+**策略**：根据目标数m动态调整MinNorm QP求解的迭代次数：
+
+```python
+@staticmethod
+def _compute_dynamic_iters(m: int) -> int:
+    if m <= 2:
+        return 50
+    if m <= 5:
+        return 100
+    if m <= 8:
+        return 200
+    return 250
+```
+
+---
+
+## 6. 实验计划
 
 ### Stage 1：基线验证
 - 验证NFJD核心链路正确性

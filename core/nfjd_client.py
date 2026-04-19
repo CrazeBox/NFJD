@@ -135,8 +135,6 @@ class NFJDClient:
             for batch_inputs, batch_targets in loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_targets = batch_targets.to(self.device)
-                step_idx += 1
-
                 predictions = model(batch_inputs)
                 losses = objective_fn(predictions, batch_targets, batch_inputs)
                 if m is None:
@@ -147,7 +145,7 @@ class NFJDClient:
                         self.stochastic_solver.max_iters = dynamic_iters
 
                 # 判断是否为重算步
-                need_recompute = (step_idx % self.recompute_interval == 1) or (self.prev_lambda is None)
+                need_recompute = (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
 
                 if need_recompute:
                     # 完整路径：Jacobian → MinNorm → Rescaling → Momentum → Update
@@ -242,6 +240,7 @@ class NFJDClient:
                 add_flat_update_(model.parameters(), momentum_direction, alpha=-self.learning_rate)
                 if final_lambda is not None:
                     self.prev_lambda = final_lambda.detach().clone()
+                step_idx += 1
 
         theta_final = flatten_parameters(model.parameters())
         delta_theta = theta_final - theta_init
@@ -279,3 +278,4 @@ class NFJDClient:
             return [float("nan")]
         means = all_values.mean(dim=1)
         return [float(v.item()) for v in means]
+
