@@ -76,7 +76,7 @@ def make_multimnist(
             assigned = shuffled_classes[i * noniid_classes_per_client:(i+1) * noniid_classes_per_client]
             for c in assigned:
                 client_indices[i].extend(class_indices[c].tolist())
-        client_indices = [torch.tensor(idx) for idx in client_indices]
+        client_indices = [torch.tensor(idx, dtype=torch.long) for idx in client_indices]
 
     client_datasets = []
     for idx in client_indices:
