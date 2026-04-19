@@ -184,6 +184,9 @@ class FedJDServer:
 
         client_compute_time = time.time() - client_start
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         if aggregated_jacobian is None:
             raise RuntimeError("No client contributed a Jacobian.")
 
@@ -250,19 +253,22 @@ class FedJDServer:
         self.model.eval()
         with torch.no_grad():
             for client in self.clients:
-                loader = DataLoader(client.dataset, batch_size=len(client.dataset), shuffle=False)
+                loader = DataLoader(client.dataset, batch_size=256, shuffle=False)
+                client_values = []
                 for batch_inputs, batch_targets in loader:
                     batch_inputs = batch_inputs.to(self.device)
                     batch_targets = batch_targets.to(self.device)
                     predictions = self.model(batch_inputs)
                     values = self.objective_fn(predictions, batch_targets, batch_inputs)
                     stacked = torch.stack([value.detach() for value in values])
+                    client_values.append(stacked.mean(dim=1))
+                if client_values:
+                    avg_values = torch.stack(client_values).mean(dim=0)
                     weight = client.num_examples / total_examples
                     if running is None:
-                        running = weight * stacked
+                        running = weight * avg_values
                     else:
-                        running.add_(weight * stacked)
-                    break
+                        running.add_(weight * avg_values)
         self.model.train()
         if running is None:
             raise RuntimeError("No clients available for evaluation.")

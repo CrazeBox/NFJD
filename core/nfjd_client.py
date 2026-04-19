@@ -120,14 +120,6 @@ class NFJDClient:
             return 200
         return 250
 
-    def _unscale_grads(self, model: nn.Module) -> None:
-        if not self.use_mixed_precision:
-            return
-        inv_scale = 1.0 / 65536.0
-        for p in model.parameters():
-            if p.grad is not None:
-                p.grad.data.mul_(inv_scale)
-
     def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> ClientResult:
         start = time.time()
         theta_init = flatten_parameters(model.parameters()).clone()
@@ -172,7 +164,6 @@ class NFJDClient:
                         model.zero_grad(set_to_none=True)
                         retain = grad_pos < len(objective_indices) - 1
                         losses[objective_idx].backward(retain_graph=retain)
-                        self._unscale_grads(model)
                         independent_grads.append(flatten_gradients(model.parameters()))
 
                     jacobian = torch.stack(independent_grads, dim=0)
@@ -206,7 +197,6 @@ class NFJDClient:
                         L_total = sum(lam[i] * losses[i] for i in range(m))
                         model.zero_grad(set_to_none=True)
                         L_total.backward()
-                        self._unscale_grads(model)
                         direction = flatten_gradients(model.parameters())
                         model.zero_grad(set_to_none=True)
                         rescale_factor = last_rescale_factor
@@ -223,7 +213,6 @@ class NFJDClient:
                             model.zero_grad(set_to_none=True)
                             retain = grad_pos < len(objective_indices) - 1
                             losses[objective_idx].backward(retain_graph=retain)
-                            self._unscale_grads(model)
                             independent_grads.append(flatten_gradients(model.parameters()))
 
                         jacobian = torch.stack(independent_grads, dim=0)

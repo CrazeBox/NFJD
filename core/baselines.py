@@ -17,19 +17,22 @@ def _evaluate_global_objectives(model, clients, objective_fn, device):
     model.eval()
     with torch.no_grad():
         for client in clients:
-            loader = DataLoader(client.dataset, batch_size=len(client.dataset), shuffle=False)
+            loader = DataLoader(client.dataset, batch_size=256, shuffle=False)
+            client_values = []
             for batch_inputs, batch_targets in loader:
                 batch_inputs = batch_inputs.to(device)
                 batch_targets = batch_targets.to(device)
                 predictions = model(batch_inputs)
                 values = objective_fn(predictions, batch_targets, batch_inputs)
                 stacked = torch.stack([value.detach() for value in values])
+                client_values.append(stacked.mean(dim=1))
+            if client_values:
+                avg_values = torch.stack(client_values).mean(dim=0)
                 weight = client.num_examples / total_examples
                 if running is None:
-                    running = weight * stacked
+                    running = weight * avg_values
                 else:
-                    running.add_(weight * stacked)
-                break
+                    running.add_(weight * avg_values)
     model.train()
     if running is None:
         raise RuntimeError("No clients available.")
@@ -84,6 +87,9 @@ class FMGDAServer:
             if per_client_upload == 0:
                 per_client_upload = result.upload_bytes
         client_compute_time = time.time() - client_start
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         dir_start = time.time()
         aggregated = torch.zeros_like(all_jacobians[0])
@@ -187,6 +193,9 @@ class WeightedSumServer:
                 per_client_grad_upload = weighted_grad.numel() * weighted_grad.element_size()
         client_compute_time = time.time() - client_start
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         dir_start = time.time()
         direction = torch.stack(all_weighted_grads).mean(dim=0)
         direction_time = time.time() - dir_start
@@ -271,6 +280,9 @@ class DirectionAvgServer:
             if per_client_dir_upload == 0:
                 per_client_dir_upload = local_dir.numel() * local_dir.element_size()
         client_compute_time = time.time() - client_start
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         dir_start = time.time()
         direction = torch.stack(all_directions).mean(dim=0)
