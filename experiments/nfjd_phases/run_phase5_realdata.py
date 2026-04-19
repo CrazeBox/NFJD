@@ -184,7 +184,7 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
                 local_epochs=1, fair_comparison=False):
 
     if method == "nfjd":
-        clients = [NFJDClient(client_id=i, dataset=client_datasets[i], batch_size=64,
+        clients = [NFJDClient(client_id=i, dataset=client_datasets[i], batch_size=256,
                               device=device, local_epochs=local_epochs, learning_rate=learning_rate,
                               local_momentum_beta=0.9, use_adaptive_rescaling=True,
                               use_stochastic_gramian=True, stochastic_subset_size=min(4, m),
@@ -193,29 +193,30 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
                             device=device, global_momentum_beta=0.9,
-                            conflict_aware_momentum=False, momentum_min_beta=0.1)
+                            conflict_aware_momentum=False, momentum_min_beta=0.1,
+                            parallel_clients=True)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
-        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=64, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=256, device=device) for i in range(num_clients)]
         aggregator = MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fmgda":
-        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=64, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=256, device=device) for i in range(num_clients)]
         server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "weighted_sum":
-        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=64, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=256, device=device) for i in range(num_clients)]
         server = WeightedSumServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "direction_avg":
-        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=64, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=256, device=device) for i in range(num_clients)]
         server = DirectionAvgServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "stl":
         from fedjd.core.client import FedJDClient as _FJC
         single_ds = torch.utils.data.ConcatDataset(client_datasets)
-        client = _FJC(client_id=0, dataset=single_ds, batch_size=64, device=device)
+        client = _FJC(client_id=0, dataset=single_ds, batch_size=256, device=device)
         server = WeightedSumServer(model=model, clients=[client], objective_fn=objective_fn, participation_rate=1.0, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     else:

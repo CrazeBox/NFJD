@@ -1,0 +1,128 @@
+================================================================================
+NFJD 客户端耗时分解分析
+================================================================================
+
+设备: cuda
+模型参数量: 178
+
+步骤                             耗时(秒)        占比        
+------------------------------------------------------------
+
+总计 24 个batch, 3个epochs:
+------------------------------------------------------------
+data_load                      0.0005         0.0%
+forward                        0.0781         2.4%
+loss_compute                   0.0326         1.0%
+jacobian_backward              0.0474         1.4%
+minnorm_qp                     3.1090        93.9%
+rescaling                      0.0071         0.2%
+cosine_sim                     0.0314         0.9%
+momentum                       0.0005         0.0%
+param_update                   0.0059         0.2%
+TOTAL                          3.3125       100.0%
+
+平均每步时间: 0.1380秒
+每轮(20步)预估时间: 2.76秒
+
+
+================================================================================
+隐式同步点检查
+================================================================================
+
+搜索 '.item()':
+  core\baselines.py:36 return [float(value.item()) for value in running]
+  core\baselines.py:118 direction_norm=float(torch.norm(direction, p=2).item()),
+  core\baselines.py:119 jacobian_norm=float(torch.norm(aggregated, p="fro").item()),
+  core\baselines.py:211 direction_norm=float(torch.norm(direction, p=2).item()),
+  core\baselines.py:296 direction_norm=float(torch.norm(direction, p=2).item()),
+  core\client.py:123 return [float(v.item()) for v in means]
+  core\nfjd_server.py:95 return [float(value.item()) for value in running]
+  core\nfjd_server.py:151 delta_norm=float(torch.norm(aggregated_delta, p=2).item()),
+  core\nfjd_server.py:152 global_momentum_norm=float(torch.norm(momentum_delta, p=2).item()),
+  core\server.py:61 return int(torch.isnan(tensor).sum().item() + torch.isinf(tensor).sum().item())
+  core\server.py:123 direction_norm=float(torch.norm(direction, p=2).item()),
+  core\server.py:223 direction_norm=float(torch.norm(direction, p=2).item()),
+  core\server.py:224 jacobian_norm=float(torch.norm(aggregated_jacobian, p="fro").item()),
+  core\server.py:269 return [float(value.item()) for value in running]
+  data\classification.py:55 shift = torch.randint(0, num_classes, (1,), generator=generator).item()
+  experiments\fedjd_legacy\run_s5_highconflict.py:70 cos = torch.nn.functional.cosine_similarity(grads[i].unsqueeze(0), grads[j].unsq
+  experiments\nfjd_phases\run_phase5_realdata.py:57 correct[t] += (pred_labels == true_labels).sum().item()
+  experiments\nfjd_phases\run_phase5_realdata.py:170 mse = ((all_preds[:, t] - all_targets[:, t]) ** 2).mean().item()
+  共 18 处
+
+搜索 '.cpu()':
+  experiments\nfjd_phases\run_phase5_realdata.py:108 all_preds.append(pred.cpu())
+  experiments\nfjd_phases\run_phase5_realdata.py:109 all_targets.append(by.cpu())
+  experiments\nfjd_phases\run_phase5_realdata.py:164 all_preds.append(pred.cpu())
+  experiments\nfjd_phases\run_phase5_realdata.py:165 all_targets.append(by.cpu())
+  共 4 处
+
+搜索 '.numpy()':
+  data\multimnist.py:71 labels_for_split = train_y[:, 0].numpy()
+  data\river_flow.py:65 sorted_idx = np.argsort(train_Y[:, 0].numpy())
+  共 2 处
+
+搜索 'print(':
+  experiments\fedjd_legacy\analyze_s2_results.py:53 print(f"No results found at {csv_path}")
+  experiments\fedjd_legacy\analyze_s2_results.py:58 print(f"Loaded {len(valid)} valid results (out of {len(results)} total)")
+  experiments\fedjd_legacy\analyze_s2_results.py:73 print(f"\nPlots saved to {out_path}")
+  experiments\fedjd_legacy\analyze_s2_results.py:79 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:80 print("Communication vs Number of Objectives (m)")
+  experiments\fedjd_legacy\analyze_s2_results.py:81 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:86 print(f"  m={m}: avg upload/client = {np.mean(uploads):.0f} bytes ({np.mean(uplo
+  experiments\fedjd_legacy\analyze_s2_results.py:90 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:91 print("Communication vs Model Size (d)")
+  experiments\fedjd_legacy\analyze_s2_results.py:92 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:100 print(f"  {size} (d鈮坽np.mean(d_vals):.0f}): avg upload/client = {np.mean(uploads
+  experiments\fedjd_legacy\analyze_s2_results.py:104 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:105 print("Time Breakdown (averaged over all experiments)")
+  experiments\fedjd_legacy\analyze_s2_results.py:106 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:116 print(f"  Client Jacobian compute: {avg_client:.4f}s ({avg_client/avg_round*100:
+  experiments\fedjd_legacy\analyze_s2_results.py:117 print(f"  Direction computation:   {avg_dir:.4f}s ({avg_dir/avg_round*100:.1f}%)
+  experiments\fedjd_legacy\analyze_s2_results.py:118 print(f"  Other (agg+update+eval): {other:.4f}s ({other/avg_round*100:.1f}%)")
+  experiments\fedjd_legacy\analyze_s2_results.py:119 print(f"  Total round time:        {avg_round:.4f}s")
+  experiments\fedjd_legacy\analyze_s2_results.py:123 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:124 print("Participation Rate Impact")
+  experiments\fedjd_legacy\analyze_s2_results.py:125 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:133 print(f"  C={c:.2f}: avg upload/round = {np.mean(uploads):.0f} B, avg round time
+  experiments\fedjd_legacy\analyze_s2_results.py:137 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:138 print("Jacobian vs Gradient Upload Ratio")
+  experiments\fedjd_legacy\analyze_s2_results.py:139 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:144 print(f"  m={m}: Jacobian/Gradient ratio = {np.mean(ratios):.2f}x (theoretical =
+  experiments\fedjd_legacy\analyze_s2_results.py:148 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:149 print("Bottleneck Analysis")
+  experiments\fedjd_legacy\analyze_s2_results.py:150 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s2_results.py:162 print(f"  TIME BOTTLENECK: Client Jacobian compute ({avg_client/avg_round*100:.1
+  experiments\fedjd_legacy\analyze_s2_results.py:164 print(f"  TIME BOTTLENECK: Direction computation ({avg_dir/avg_round*100:.1f}% o
+  experiments\fedjd_legacy\analyze_s2_results.py:169 print(f"  COMMUNICATION: Jacobian upload is {avg_ratio:.1f}x larger than gradien
+  experiments\fedjd_legacy\analyze_s2_results.py:180 print(f"  COST SENSITIVITY: More sensitive to m (CV={m_sensitivity:.3f}) than d 
+  experiments\fedjd_legacy\analyze_s2_results.py:182 print(f"  COST SENSITIVITY: More sensitive to d (CV={d_sensitivity:.3f}) than m 
+  experiments\fedjd_legacy\analyze_s2_results.py:453 print(f"Report saved to {path}")
+  experiments\fedjd_legacy\analyze_s3_results.py:52 print(f"No results found at {csv_path}")
+  experiments\fedjd_legacy\analyze_s3_results.py:57 print(f"Loaded {len(valid)} valid results (out of {len(results)} total)")
+  experiments\fedjd_legacy\analyze_s3_results.py:67 print(f"\nPlots saved to {out_path}")
+  experiments\fedjd_legacy\analyze_s3_results.py:73 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:74 print("Compression vs Full Upload (A/B Group)")
+  experiments\fedjd_legacy\analyze_s3_results.py:75 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:87 print(f"  {comp:16s}: avg_delta={np.mean(deltas):.4f}, upload_saving={np.mean(sa
+  experiments\fedjd_legacy\analyze_s3_results.py:91 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:92 print("Sync Frequency + Local Steps (C Group)")
+  experiments\fedjd_legacy\analyze_s3_results.py:93 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:103 print(f"  sync={si} ls={ls}: avg_delta={np.mean(deltas):.4f}, upload_saving={np.
+  experiments\fedjd_legacy\analyze_s3_results.py:107 print("\n" + "=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:108 print("Pareto Analysis: Upload Saving vs Objective Quality")
+  experiments\fedjd_legacy\analyze_s3_results.py:109 print("=" * 60)
+  experiments\fedjd_legacy\analyze_s3_results.py:134 print(f"  {comp:16s}: saving={saving*100:.1f}%, quality={qr:.2f}x, delta={delta:
+  experiments\fedjd_legacy\analyze_s3_results.py:329 print(f"Report saved to {path}")
+  experiments\fedjd_legacy\analyze_s5_results.py:214 print("No results found!")
+  experiments\fedjd_legacy\analyze_s5_results.py:225 print(f"Report saved to {report_path}")
+  experiments\fedjd_legacy\analyze_s5_results.py:226 print("Analysis complete!")
+  experiments\nfjd_phases\analyze_nfjd_results.py:176 print(f"Report saved to {report_dir / 'nfjd_report.md'}")
+  共 55 处
+
+
+================================================================================
+性能分析完成
+================================================================================
+
+结果文件: e:\AIProject\fedjd\experiments\nfjd_phases\profile_result.txt

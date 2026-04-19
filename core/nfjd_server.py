@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import torch
@@ -47,6 +48,7 @@ class NFJDServer:
         global_momentum_beta: float = 0.9,
         conflict_aware_momentum: bool = False,
         momentum_min_beta: float = 0.1,
+        parallel_clients: bool = True,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -60,6 +62,7 @@ class NFJDServer:
             min_beta=momentum_min_beta,
         )
         self.conflict_aware_momentum = conflict_aware_momentum
+        self.parallel_clients = parallel_clients
 
     def sample_clients(self) -> list[NFJDClient]:
         sample_size = max(int(len(self.clients) * self.participation_rate), 1)
@@ -107,8 +110,17 @@ class NFJDServer:
         local_epochs_list = []
         cosine_sims = []
 
-        for client in sampled_clients:
-            result = client.local_update(self._clone_model(), self.objective_fn)
+        def _run_single_client(client):
+            model_clone = self._clone_model()
+            return client.local_update(model_clone, self.objective_fn)
+
+        if self.parallel_clients and len(sampled_clients) > 1:
+            with ThreadPoolExecutor(max_workers=len(sampled_clients)) as executor:
+                results = list(executor.map(_run_single_client, sampled_clients))
+        else:
+            results = [_run_single_client(client) for client in sampled_clients]
+
+        for result in results:
             weight = result.num_examples / total_examples
             delta_thetas.append((result.delta_theta.to(self.device) * weight, weight))
             sampled_ids.append(result.client_id)

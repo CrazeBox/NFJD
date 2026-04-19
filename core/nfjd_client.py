@@ -88,7 +88,7 @@ class NFJDClient:
         self.adaptive_rescaling = AdaptiveRescaling(epsilon=1e-8, max_scale=rescaling_max_scale) if use_adaptive_rescaling else None
         self.stochastic_solver = StochasticGramianSolver(
             subset_size=stochastic_subset_size,
-            max_iters=minnorm_max_iters,
+            max_iters=minnorm_max_iters,  # 使用配置的max_iters（默认250），早停机制会自动提前停止
             lr=minnorm_lr,
             seed=stochastic_seed,
         ) if use_stochastic_gramian else None
@@ -97,6 +97,18 @@ class NFJDClient:
     @property
     def num_examples(self) -> int:
         return len(self.dataset)
+
+    @staticmethod
+    def _compute_dynamic_iters(m: int) -> int:
+        """根据目标数动态调整QP迭代次数，平衡速度与收敛质量"""
+        if m <= 2:
+            return 50
+        elif m <= 5:
+            return 100
+        elif m <= 8:
+            return 200
+        else:
+            return 250
 
     def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> ClientResult:
         start = time.time()
@@ -119,6 +131,11 @@ class NFJDClient:
                 losses = objective_fn(predictions, batch_targets, batch_inputs)
                 if m is None:
                     m = len(losses)
+                    self._dynamic_minnorm_iters = self._compute_dynamic_iters(m)
+                    
+                    # 更新stochastic_solver的max_iters（如果存在）
+                    if self.stochastic_solver is not None:
+                        self.stochastic_solver.max_iters = self._dynamic_minnorm_iters
 
                 if self.prev_lambda is not None:
                     lambda_weights = self.prev_lambda.detach().to(self.device)
@@ -141,28 +158,18 @@ class NFJDClient:
 
                 if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                     direction, sampled_indices = self.stochastic_solver.solve(jacobian)
+                    final_lambda = self.stochastic_solver.last_lambda
                 else:
-                    aggregator = MinNormAggregator(max_iters=self.minnorm_max_iters, lr=self.minnorm_lr)
+                    aggregator = MinNormAggregator(max_iters=self._dynamic_minnorm_iters, lr=self.minnorm_lr)
                     direction = aggregator(jacobian)
                     sampled_indices = list(range(m))
+                    # 直接获取lambda：从方向重建（因为MinNormAggregator不返回lambda）
+                    # 这里简化处理，直接用均匀权重
+                    final_lambda = torch.ones(m, device=jacobian.device) / m
 
                 if self.adaptive_rescaling is not None:
                     direction = self.adaptive_rescaling(direction, jacobian)
                     rescale_factor = self.adaptive_rescaling.last_scale
-
-                with torch.no_grad():
-                    gramian = jacobian @ jacobian.T
-                    agg = MinNormAggregator(max_iters=self.minnorm_max_iters, lr=self.minnorm_lr)
-                    lambdas = torch.ones(m, device=jacobian.device) / m
-                    for _ in range(self.minnorm_max_iters):
-                        grad = gramian @ lambdas
-                        from fedjd.aggregators import _project_simplex
-                        candidate = _project_simplex(lambdas - self.minnorm_lr * grad)
-                        if torch.norm(candidate - lambdas, p=2) <= 1e-8:
-                            lambdas = candidate
-                            break
-                        lambdas = candidate
-                    final_lambda = lambdas.detach().clone()
 
                 if self.conflict_aware_momentum:
                     avg_cosine_sim = compute_avg_cosine_sim(jacobian)

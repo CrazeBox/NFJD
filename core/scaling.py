@@ -41,10 +41,7 @@ class StochasticGramianSolver:
         indices = sorted(self.rng.sample(range(m), self.subset_size))
         sub_jacobian = jacobian[indices]
 
-        aggregator = MinNormAggregator(max_iters=self.max_iters, lr=self.lr)
-        sub_direction = aggregator(sub_jacobian)
-
-        full_lambda = torch.zeros(m, dtype=jacobian.dtype, device=jacobian.device)
+        # 内部MinNorm计算，同时得到lambda
         sub_gramian = sub_jacobian @ sub_jacobian.T
         lambdas = torch.full((self.subset_size,), 1.0 / self.subset_size, dtype=jacobian.dtype, device=jacobian.device)
         for _ in range(self.max_iters):
@@ -55,12 +52,24 @@ class StochasticGramianSolver:
                 lambdas = candidate
                 break
             lambdas = candidate
+
+        # 将子集lambda扩展到完整空间
+        full_lambda = torch.zeros(m, dtype=jacobian.dtype, device=jacobian.device)
         for i, idx in enumerate(indices):
             full_lambda[idx] = lambdas[i]
 
         direction = jacobian.T @ full_lambda
+        self.last_lambda = full_lambda
         self.last_indices = indices
         return direction, indices
+
+    @property
+    def last_lambda(self) -> torch.Tensor | None:
+        return getattr(self, '_last_lambda', None)
+
+    @last_lambda.setter
+    def last_lambda(self, value: torch.Tensor):
+        self._last_lambda = value
 
 
 def compute_avg_cosine_sim(jacobian: torch.Tensor) -> float:
