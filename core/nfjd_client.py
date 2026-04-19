@@ -76,7 +76,7 @@ class NFJDClient:
         minnorm_lr: float = 0.1,
         conflict_aware_momentum: bool = False,
         momentum_min_beta: float = 0.1,
-        recompute_interval: int = 1,
+        recompute_interval: int = 2,
     ) -> None:
         self.client_id = client_id
         self.dataset = dataset
