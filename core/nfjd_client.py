@@ -90,7 +90,6 @@ class NFJDClient:
         self.recompute_interval = max(recompute_interval, 1)
 
         self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
-        self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_mixed_precision)
 
         self.prev_lambda: torch.Tensor | None = None
         self.local_momentum = LocalMomentum(
@@ -121,6 +120,14 @@ class NFJDClient:
             return 200
         return 250
 
+    def _unscale_grads(self, model: nn.Module) -> None:
+        if not self.use_mixed_precision:
+            return
+        inv_scale = 1.0 / 65536.0
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad.data.mul_(inv_scale)
+
     def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> ClientResult:
         start = time.time()
         theta_init = flatten_parameters(model.parameters()).clone()
@@ -150,11 +157,9 @@ class NFJDClient:
                     if self.stochastic_solver is not None:
                         self.stochastic_solver.max_iters = dynamic_iters
 
-                # 判断是否为重算步
                 need_recompute = (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
 
                 if need_recompute:
-                    # 完整路径：Jacobian → MinNorm → Rescaling → Momentum → Update
                     if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                         sampled_indices = self.stochastic_solver.sample_indices(m)
                         objective_indices = sampled_indices
@@ -166,8 +171,8 @@ class NFJDClient:
                     for grad_pos, objective_idx in enumerate(objective_indices):
                         model.zero_grad(set_to_none=True)
                         retain = grad_pos < len(objective_indices) - 1
-                        self.grad_scaler.scale(losses[objective_idx]).backward(retain_graph=retain)
-                        self.grad_scaler.unscale_(model)
+                        losses[objective_idx].backward(retain_graph=retain)
+                        self._unscale_grads(model)
                         independent_grads.append(flatten_gradients(model.parameters()))
 
                     jacobian = torch.stack(independent_grads, dim=0)
@@ -196,18 +201,16 @@ class NFJDClient:
                     else:
                         momentum_direction = self.local_momentum.update(direction)
                 else:
-                    # Cheap step：用上一次lambda构造加权损失，单次反向传播
                     if self.prev_lambda is not None:
                         lam = self.prev_lambda.detach()
                         L_total = sum(lam[i] * losses[i] for i in range(m))
                         model.zero_grad(set_to_none=True)
-                        self.grad_scaler.scale(L_total).backward()
-                        self.grad_scaler.unscale_(model)
+                        L_total.backward()
+                        self._unscale_grads(model)
                         direction = flatten_gradients(model.parameters())
                         model.zero_grad(set_to_none=True)
                         rescale_factor = last_rescale_factor
                     else:
-                        # Fallback: 如果prev_lambda不存在，走完整路径
                         if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                             sampled_indices = self.stochastic_solver.sample_indices(m)
                             objective_indices = sampled_indices
@@ -219,8 +222,8 @@ class NFJDClient:
                         for grad_pos, objective_idx in enumerate(objective_indices):
                             model.zero_grad(set_to_none=True)
                             retain = grad_pos < len(objective_indices) - 1
-                            self.grad_scaler.scale(losses[objective_idx]).backward(retain_graph=retain)
-                            self.grad_scaler.unscale_(model)
+                            losses[objective_idx].backward(retain_graph=retain)
+                            self._unscale_grads(model)
                             independent_grads.append(flatten_gradients(model.parameters()))
 
                         jacobian = torch.stack(independent_grads, dim=0)
@@ -243,11 +246,9 @@ class NFJDClient:
                             rescale_factor = self.adaptive_rescaling.last_scale
                             last_rescale_factor = rescale_factor
 
-                    # Cheap步不更新cosine_sim（保持上一轮的值）
                     momentum_direction = self.local_momentum.update(direction)
 
                 add_flat_update_(model.parameters(), momentum_direction, alpha=-self.learning_rate)
-                self.grad_scaler.update()
                 if final_lambda is not None:
                     self.prev_lambda = final_lambda.detach().clone()
                 step_idx += 1
@@ -288,4 +289,3 @@ class NFJDClient:
             return [float("nan")]
         means = all_values.mean(dim=1)
         return [float(v.item()) for v in means]
-
