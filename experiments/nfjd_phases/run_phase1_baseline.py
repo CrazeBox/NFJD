@@ -45,7 +45,7 @@ def _run_single(method, dataset, m, seed, num_rounds=50,
                 model_size="small", local_epochs=3, use_adaptive_rescaling=True,
                 use_stochastic_gramian=True, conflict_strength=0.0):
     exp_id = f"P1-{method}-synth-m{m}-seed{seed}"
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     random.seed(seed)
 

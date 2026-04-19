@@ -16,50 +16,45 @@ from fedjd.core import (
     DirectionAvgServer, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
-from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
+from fedjd.data import make_high_conflict_federated_regression
 from fedjd.metrics import extract_pareto_front, hypervolume
-from fedjd.models import MediumRegressor, SmallRegressor
+from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = Path("e:/AIProject/results/nfjd_benchmark")
+RESULTS_DIR = Path("e:/AIProject/results/nfjd_phase3")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "m", "seed", "num_rounds", "num_clients",
     "participation_rate", "learning_rate", "conflict_strength",
     "model_size", "local_epochs", "use_adaptive_rescaling",
-    "use_stochastic_gramian", "elapsed_time", "all_decreased",
-    "hypervolume", "pareto_gap", "avg_relative_improvement",
-    "avg_upload_bytes", "avg_round_time", "upload_per_client", "avg_rescale_factor",
+    "use_stochastic_gramian", "conflict_aware_momentum",
+    "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
+    "avg_relative_improvement", "avg_upload_bytes", "avg_round_time",
+    "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
 ]
 MAX_M = 10
 for i in range(MAX_M):
     ALL_FIELDNAMES.extend([f"init_obj_{i}", f"final_obj_{i}", f"delta_obj_{i}"])
 
 
-def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
+def _run_single(method, m, seed, conflict_strength, num_rounds=50,
                 num_clients=10, participation_rate=0.5, learning_rate=0.01,
                 model_size="small", local_epochs=3, use_adaptive_rescaling=True,
-                use_stochastic_gramian=True):
-    exp_id = f"NFJD-{method}-{dataset}-m{m}-seed{seed}"
+                use_stochastic_gramian=True, conflict_aware_momentum=False):
+    exp_id = f"P3-{method}-m{m}-cs{conflict_strength}-seed{seed}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     random.seed(seed)
 
-    if conflict_strength > 0:
-        fed_data = make_high_conflict_federated_regression(
-            num_clients=num_clients, samples_per_client=100, input_dim=8,
-            num_objectives=m, conflict_strength=conflict_strength, seed=seed)
-    else:
-        fed_data = make_synthetic_federated_regression(
-            num_clients=num_clients, samples_per_client=100, input_dim=8,
-            num_objectives=m, seed=seed)
+    fed_data = make_high_conflict_federated_regression(
+        num_clients=num_clients, samples_per_client=100, input_dim=8,
+        num_objectives=m, conflict_strength=conflict_strength, seed=seed)
 
-    model_cls = MediumRegressor if model_size == "medium" else SmallRegressor
-    model = model_cls(input_dim=fed_data.input_dim, output_dim=m)
+    model = SmallRegressor(input_dim=fed_data.input_dim, output_dim=m)
     objective_fn = multi_objective_regression
 
     if method == "nfjd":
@@ -67,10 +62,13 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
                               device=device, local_epochs=local_epochs, learning_rate=learning_rate,
                               local_momentum_beta=0.9, use_adaptive_rescaling=use_adaptive_rescaling,
                               use_stochastic_gramian=use_stochastic_gramian, stochastic_subset_size=4,
-                              stochastic_seed=seed) for i in range(num_clients)]
+                              stochastic_seed=seed, conflict_aware_momentum=conflict_aware_momentum,
+                              momentum_min_beta=0.1) for i in range(num_clients)]
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
-                            device=device, global_momentum_beta=0.9)
+                            device=device, global_momentum_beta=0.9,
+                            conflict_aware_momentum=conflict_aware_momentum,
+                            momentum_min_beta=0.1)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
         clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
@@ -131,18 +129,25 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
     upload_per_client = avg_upload / max(participation_rate * num_clients, 1)
 
     avg_rescale = 1.0
+    avg_cosine_sim = 0.0
+    avg_effective_beta = 0.9
     if method == "nfjd":
         rescale_vals = [s.avg_rescale_factor for s in history]
         avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
+        cosine_vals = [getattr(s, "avg_cosine_sim", 0.0) for s in history]
+        avg_cosine_sim = sum(cosine_vals) / len(cosine_vals) if cosine_vals else 0.0
+        beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
+        avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
 
     row = {
-        "exp_id": exp_id, "method": method, "dataset": dataset, "m": m, "seed": seed,
-        "num_rounds": num_rounds, "num_clients": num_clients,
+        "exp_id": exp_id, "method": method, "dataset": f"highconflict_cs{conflict_strength}",
+        "m": m, "seed": seed, "num_rounds": num_rounds, "num_clients": num_clients,
         "participation_rate": participation_rate, "learning_rate": learning_rate,
         "conflict_strength": conflict_strength,
         "model_size": model_size, "local_epochs": local_epochs if method == "nfjd" else 1,
         "use_adaptive_rescaling": use_adaptive_rescaling if method == "nfjd" else False,
         "use_stochastic_gramian": use_stochastic_gramian if method == "nfjd" else False,
+        "conflict_aware_momentum": conflict_aware_momentum if method == "nfjd" else False,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
         "hypervolume": round(hv, 6), "pareto_gap": round(pg, 6),
         "avg_relative_improvement": round(avg_ri, 6),
@@ -150,6 +155,8 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         "avg_round_time": round(avg_round_time, 4),
         "upload_per_client": round(upload_per_client, 0),
         "avg_rescale_factor": round(avg_rescale, 4),
+        "avg_cosine_sim": round(avg_cosine_sim, 4),
+        "avg_effective_beta": round(avg_effective_beta, 4),
     }
     for i in range(MAX_M):
         if i < m:
@@ -161,8 +168,8 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
 
-    logger.info("[%s] %s: NHV=%.4f RI=%.4f upload/client=%d rescale=%.2f",
-                exp_id, method, hv, avg_ri, upload_per_client, avg_rescale)
+    logger.info("[%s] %s: RI=%.4f NHV=%.4f cs=%.2f sim=%.3f beta=%.2f",
+                exp_id, method, avg_ri, hv, conflict_strength, avg_cosine_sim, avg_effective_beta)
     return row
 
 
@@ -178,35 +185,26 @@ def _write_csv(csv_path, rows):
 def main():
     SEEDS = [7, 42, 123]
     METHODS = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
+    M_VALUES = [2, 3, 5]
+    CONFLICT_STRENGTHS = [0.5, 1.0, 2.0]
     all_rows = []
     experiments = []
 
-    for m in [2, 3, 5]:
-        for method in METHODS:
+    for cs in CONFLICT_STRENGTHS:
+        for m in M_VALUES:
+            for method in METHODS:
+                for seed in SEEDS:
+                    experiments.append(dict(method=method, m=m, seed=seed,
+                        conflict_strength=cs, conflict_aware_momentum=False))
+
+    for cs in CONFLICT_STRENGTHS:
+        for m in M_VALUES:
             for seed in SEEDS:
-                experiments.append(dict(method=method, dataset="synthetic_regression",
-                    m=m, seed=seed, conflict_strength=0.0, num_rounds=50, model_size="small", local_epochs=3))
-
-    for m in [2, 3, 5]:
-        for method in METHODS:
-            for seed in SEEDS:
-                experiments.append(dict(method=method, dataset="highconflict_regression",
-                    m=m, seed=seed, conflict_strength=1.0, num_rounds=50, model_size="small", local_epochs=3))
-
-    for m in [2, 5]:
-        for seed in SEEDS:
-            experiments.append(dict(method="nfjd", dataset="highconflict_regression",
-                m=m, seed=seed, conflict_strength=1.0, num_rounds=50, model_size="small",
-                local_epochs=3, use_adaptive_rescaling=False))
-
-    for m in [2, 5]:
-        for seed in SEEDS:
-            experiments.append(dict(method="nfjd", dataset="highconflict_regression",
-                m=m, seed=seed, conflict_strength=1.0, num_rounds=50, model_size="small",
-                local_epochs=3, use_stochastic_gramian=False))
+                experiments.append(dict(method="nfjd", m=m, seed=seed,
+                    conflict_strength=cs, conflict_aware_momentum=True))
 
     total = len(experiments)
-    logger.info(f"Starting NFJD benchmark: {total} experiments")
+    logger.info(f"Starting NFJD Phase 3 High-Conflict: {total} experiments")
 
     for idx, exp in enumerate(experiments):
         logger.info(f"[{idx+1}/{total}] Running {exp}...")
@@ -218,9 +216,9 @@ def main():
             import traceback
             traceback.print_exc()
 
-    csv_path = RESULTS_DIR / "nfjd_results.csv"
+    csv_path = RESULTS_DIR / "phase3_results.csv"
     _write_csv(csv_path, all_rows)
-    logger.info(f"NFJD benchmark complete! {len(all_rows)}/{total} experiments, saved to {csv_path}")
+    logger.info(f"Phase 3 complete! {len(all_rows)}/{total} experiments, saved to {csv_path}")
 
 
 if __name__ == "__main__":

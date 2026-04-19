@@ -40,7 +40,7 @@ class ExperimentConfig:
     checkpoint_interval: int = 10
 
     # Device
-    device: str = "cpu"
+    device: str = "auto"
 
     def get_output_dir(self) -> Path:
         if self.output_dir:

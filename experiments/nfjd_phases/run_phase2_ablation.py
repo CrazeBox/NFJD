@@ -44,7 +44,7 @@ def _run_single(ablation_group, m, seed, num_rounds=50,
                 use_stochastic_gramian=True, local_momentum_beta=0.9,
                 global_momentum_beta=0.9):
     exp_id = f"P2-{ablation_group}-m{m}-seed{seed}"
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     random.seed(seed)
 

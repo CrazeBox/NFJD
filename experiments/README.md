@@ -1,28 +1,25 @@
 # Experiments
 
-Experiment scripts for FedJD (Stages 1-4) and NFJD (Phases 1-4).
+## NFJD Experiments
 
-## FedJD Experiments (Original)
+| Script | Phase | Description |
+|--------|-------|-------------|
+| `nfjd_phases/run_phase1_baseline.py` | Phase 1 | 基线验证（5方法×3m×3seed=45次） |
+| `nfjd_phases/run_phase2_ablation.py` | Phase 2 | 消融实验（AR/GM/LM/SG/Epoch=66次） |
+| `nfjd_phases/run_nfjd_benchmark.py` | Benchmark | 完整基准测试 |
 
-| Directory | Stage | Description |
-|-----------|-------|-------------|
-| `s1_baseline/` | Stage 1 | Baseline smoke tests, MinNorm verification |
-| `s2_profile/` | Stage 2 | Communication profiling (Jacobian size vs gradient size) |
-| `s3_compress/` | Stage 3 | Compression experiments (TopK, LowRank, Float16, etc.) |
-| `s4_benchmark/` | Stage 4 | Full benchmark + high-conflict experiments |
+## Legacy FedJD Experiments
 
-## NFJD Experiments (New Architecture)
-
-| Directory | Phase | Description |
-|-----------|-------|-------------|
-| `nfjd_phases/` | Phase 1-4 | NFJD benchmark, ablation, high-conflict, full benchmark |
+| Directory | Description |
+|-----------|-------------|
+| `fedjd_legacy/` | 原始FedJD Stage 1-5实验脚本 |
 
 ## Running Experiments
 
 ```bash
-# FedJD Stage 1
-cd experiments/s1_baseline && python run_experiment.py
+# Phase 1: Baseline
+python experiments/nfjd_phases/run_phase1_baseline.py
 
-# NFJD Benchmark
-cd experiments/nfjd_phases && python run_nfjd_benchmark.py
+# Phase 2: Ablation
+python experiments/nfjd_phases/run_phase2_ablation.py
 ```
