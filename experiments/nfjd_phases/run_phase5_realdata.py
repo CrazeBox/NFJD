@@ -17,11 +17,9 @@ from fedjd.core import (
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
 from fedjd.data.multimnist import make_multimnist
-from fedjd.data.river_flow import make_river_flow
 from fedjd.data.celeba import make_celeba
 from fedjd.metrics import extract_pareto_front, hypervolume
 from fedjd.models.lenet_mtl import LeNetMTL
-from fedjd.models.river_flow_mlp import RiverFlowMLP
 from fedjd.models.celeba_cnn import CelebaCNN
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
@@ -115,67 +113,6 @@ def _run_multimnist(method, seed, iid=True, num_rounds=50,
     row["task_L_acc"] = round(accs[0], 4)
     row["task_R_acc"] = round(accs[1], 4)
     row["avg_accuracy"] = round(sum(accs) / 2, 4)
-
-    return row
-
-
-def _run_riverflow(method, seed, iid=True, num_rounds=50,
-                   num_clients=10, participation_rate=0.5, learning_rate=0.01,
-                   num_tasks=8, fair_comparison=False):
-    split_name = "iid" if iid else "geographic"
-    exp_id = f"P5-rf-{method}-{split_name}-m{num_tasks}-seed{seed}"
-    if fair_comparison:
-        exp_id = f"P5-fair-rf-{method}-{split_name}-m{num_tasks}-seed{seed}"
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
-    random.seed(seed)
-
-    data = make_river_flow(num_clients=num_clients, iid=iid, seed=seed,
-                           num_tasks=num_tasks)
-    model = RiverFlowMLP(input_dim=data["input_dim"], num_tasks=num_tasks)
-    objective_fn = multi_objective_regression
-
-    if method == "nfjd":
-        le = 3
-        nr = num_rounds
-    else:
-        le = 1
-        nr = num_rounds * 3 if fair_comparison else num_rounds
-
-    row = _run_common(
-        exp_id=exp_id, method=method, model=model,
-        client_datasets=data["client_datasets"],
-        objective_fn=objective_fn, m=num_tasks, seed=seed, device=device,
-        num_rounds=nr, num_clients=num_clients,
-        participation_rate=participation_rate, learning_rate=learning_rate,
-        model_arch="river_flow_mlp", task_type="regression",
-        dataset="river_flow", data_split=split_name,
-        local_epochs=le, fair_comparison=fair_comparison,
-    )
-
-    test_ds = data["test_dataset"]
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
-    model.eval()
-    all_preds, all_targets = [], []
-    with torch.no_grad():
-        for bx, by in test_loader:
-            bx = bx.to(device)
-            by = by.to(device)
-            pred = model(bx)
-            all_preds.append(pred.cpu())
-            all_targets.append(by.cpu())
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    per_task_mse = []
-    for t in range(num_tasks):
-        mse = ((all_preds[:, t] - all_targets[:, t]) ** 2).mean().item()
-        per_task_mse.append(mse)
-    row["per_task_mse"] = ",".join(f"{v:.6f}" for v in per_task_mse)
-    row["avg_mse"] = round(sum(per_task_mse) / len(per_task_mse), 6)
-    row["max_mse"] = round(max(per_task_mse), 6)
-    import numpy as np
-    row["mse_std"] = round(float(np.std(per_task_mse)), 6)
 
     return row
 
