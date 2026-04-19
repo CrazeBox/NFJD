@@ -69,13 +69,22 @@ def make_multimnist(
         client_indices = [indices[i*per_client:(i+1)*per_client] for i in range(num_clients)]
     else:
         labels_for_split = train_y[:, 0].numpy()
-        class_indices = {c: np.where(labels_for_split == c)[0] for c in range(10)}
-        shuffled_classes = rng.permutation(10)
+        min_samples_per_client = max(1, len(train_x) // (num_clients * 10))
+        dirichlet_alpha = 0.5
         client_indices = [[] for _ in range(num_clients)]
-        for i in range(num_clients):
-            assigned = shuffled_classes[i * noniid_classes_per_client:(i+1) * noniid_classes_per_client]
-            for c in assigned:
-                client_indices[i].extend(class_indices[c].tolist())
+        for c in range(10):
+            class_idx = np.where(labels_for_split == c)[0]
+            rng.shuffle(class_idx)
+            proportions = rng.dirichlet(np.repeat(dirichlet_alpha, num_clients))
+            proportions = proportions * (1 - min_samples_per_client * num_clients / max(len(class_idx), 1))
+            proportions = np.maximum(proportions, 0)
+            proportions = proportions / proportions.sum()
+            splits = (proportions * len(class_idx)).astype(int)
+            splits[-1] = len(class_idx) - splits[:-1].sum()
+            offset = 0
+            for i in range(num_clients):
+                client_indices[i].extend(class_idx[offset:offset + splits[i]].tolist())
+                offset += splits[i]
         client_indices = [torch.tensor(idx, dtype=torch.long) for idx in client_indices]
 
     client_datasets = []
