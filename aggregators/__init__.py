@@ -45,7 +45,7 @@ def _project_simplex(vector: torch.Tensor) -> torch.Tensor:
 class MinNormAggregator(JacobianAggregator):
     """MGDA-style minimum-norm direction finder via projected gradient descent on the simplex."""
 
-    def __init__(self, max_iters: int = 250, lr: float = 0.1, tol: float = 1e-8, max_direction_norm: float = 0.0) -> None:
+    def __init__(self, max_iters: int = 250, lr: float = 0.1, tol: float = 1e-6, max_direction_norm: float = 0.0) -> None:
         self.max_iters = max_iters
         self.lr = lr
         self.tol = tol

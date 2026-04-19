@@ -77,6 +77,7 @@ class NFJDClient:
         conflict_aware_momentum: bool = False,
         momentum_min_beta: float = 0.1,
         recompute_interval: int = 2,
+        use_mixed_precision: bool = True,
     ) -> None:
         self.client_id = client_id
         self.dataset = dataset
@@ -87,6 +88,9 @@ class NFJDClient:
         self.minnorm_max_iters = minnorm_max_iters
         self.minnorm_lr = minnorm_lr
         self.recompute_interval = max(recompute_interval, 1)
+
+        self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
+        self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_mixed_precision)
 
         self.prev_lambda: torch.Tensor | None = None
         self.local_momentum = LocalMomentum(
@@ -135,8 +139,10 @@ class NFJDClient:
             for batch_inputs, batch_targets in loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_targets = batch_targets.to(self.device)
-                predictions = model(batch_inputs)
-                losses = objective_fn(predictions, batch_targets, batch_inputs)
+
+                with torch.amp.autocast("cuda", enabled=self.use_mixed_precision):
+                    predictions = model(batch_inputs)
+                    losses = objective_fn(predictions, batch_targets, batch_inputs)
                 if m is None:
                     m = len(losses)
                     dynamic_iters = self._compute_dynamic_iters(m)
@@ -160,7 +166,8 @@ class NFJDClient:
                     for grad_pos, objective_idx in enumerate(objective_indices):
                         model.zero_grad(set_to_none=True)
                         retain = grad_pos < len(objective_indices) - 1
-                        losses[objective_idx].backward(retain_graph=retain)
+                        self.grad_scaler.scale(losses[objective_idx]).backward(retain_graph=retain)
+                        self.grad_scaler.unscale_(model)
                         independent_grads.append(flatten_gradients(model.parameters()))
 
                     jacobian = torch.stack(independent_grads, dim=0)
@@ -194,7 +201,8 @@ class NFJDClient:
                         lam = self.prev_lambda.detach()
                         L_total = sum(lam[i] * losses[i] for i in range(m))
                         model.zero_grad(set_to_none=True)
-                        L_total.backward()
+                        self.grad_scaler.scale(L_total).backward()
+                        self.grad_scaler.unscale_(model)
                         direction = flatten_gradients(model.parameters())
                         model.zero_grad(set_to_none=True)
                         rescale_factor = last_rescale_factor
@@ -211,7 +219,8 @@ class NFJDClient:
                         for grad_pos, objective_idx in enumerate(objective_indices):
                             model.zero_grad(set_to_none=True)
                             retain = grad_pos < len(objective_indices) - 1
-                            losses[objective_idx].backward(retain_graph=retain)
+                            self.grad_scaler.scale(losses[objective_idx]).backward(retain_graph=retain)
+                            self.grad_scaler.unscale_(model)
                             independent_grads.append(flatten_gradients(model.parameters()))
 
                         jacobian = torch.stack(independent_grads, dim=0)
@@ -238,6 +247,7 @@ class NFJDClient:
                     momentum_direction = self.local_momentum.update(direction)
 
                 add_flat_update_(model.parameters(), momentum_direction, alpha=-self.learning_rate)
+                self.grad_scaler.update()
                 if final_lambda is not None:
                     self.prev_lambda = final_lambda.detach().clone()
                 step_idx += 1
