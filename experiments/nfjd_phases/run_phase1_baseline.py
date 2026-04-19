@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import argparse
 import csv
 import logging
 import random
@@ -31,7 +32,8 @@ ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "m", "seed", "num_rounds", "num_clients",
     "participation_rate", "learning_rate", "conflict_strength",
     "model_size", "local_epochs", "use_adaptive_rescaling",
-    "use_stochastic_gramian", "elapsed_time", "all_decreased",
+    "use_stochastic_gramian", "client_compute_mode", "recompute_interval",
+    "elapsed_time", "all_decreased",
     "hypervolume", "pareto_gap", "avg_relative_improvement",
     "avg_upload_bytes", "avg_round_time", "upload_per_client", "avg_rescale_factor",
 ]
@@ -43,7 +45,8 @@ for i in range(MAX_M):
 def _run_single(method, dataset, m, seed, num_rounds=50,
                 num_clients=10, participation_rate=0.5, learning_rate=0.01,
                 model_size="small", local_epochs=3, use_adaptive_rescaling=True,
-                use_stochastic_gramian=True, conflict_strength=0.0):
+                use_stochastic_gramian=True, conflict_strength=0.0,
+                client_compute_mode="full_loader", recompute_interval=1):
     exp_id = f"P1-{method}-synth-m{m}-seed{seed}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
@@ -56,32 +59,38 @@ def _run_single(method, dataset, m, seed, num_rounds=50,
     model_cls = SmallRegressor
     model = model_cls(input_dim=fed_data.input_dim, output_dim=m)
     objective_fn = multi_objective_regression
+    baseline_client_kwargs = dict(
+        batch_size=32,
+        device=device,
+        use_full_loader=(client_compute_mode == "full_loader"),
+        local_epochs=local_epochs if client_compute_mode == "full_loader" else 1,
+    )
 
     if method == "nfjd":
         clients = [NFJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32,
                               device=device, local_epochs=local_epochs, learning_rate=learning_rate,
                               local_momentum_beta=0.9, use_adaptive_rescaling=use_adaptive_rescaling,
                               use_stochastic_gramian=use_stochastic_gramian, stochastic_subset_size=4,
-                              stochastic_seed=seed) for i in range(num_clients)]
+                              stochastic_seed=seed, recompute_interval=recompute_interval) for i in range(num_clients)]
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
                             device=device, global_momentum_beta=0.9)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], **baseline_client_kwargs) for i in range(num_clients)]
         aggregator = MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fmgda":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], **baseline_client_kwargs) for i in range(num_clients)]
         server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "weighted_sum":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], **baseline_client_kwargs) for i in range(num_clients)]
         server = WeightedSumServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "direction_avg":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], **baseline_client_kwargs) for i in range(num_clients)]
         server = DirectionAvgServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     else:
@@ -130,14 +139,17 @@ def _run_single(method, dataset, m, seed, num_rounds=50,
         rescale_vals = [s.avg_rescale_factor for s in history]
         avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
 
+    effective_local_epochs = local_epochs if (method == "nfjd" or client_compute_mode == "full_loader") else 1
     row = {
         "exp_id": exp_id, "method": method, "dataset": dataset, "m": m, "seed": seed,
         "num_rounds": num_rounds, "num_clients": num_clients,
         "participation_rate": participation_rate, "learning_rate": learning_rate,
         "conflict_strength": conflict_strength,
-        "model_size": model_size, "local_epochs": local_epochs if method == "nfjd" else 1,
+        "model_size": model_size, "local_epochs": effective_local_epochs,
         "use_adaptive_rescaling": use_adaptive_rescaling if method == "nfjd" else False,
         "use_stochastic_gramian": use_stochastic_gramian if method == "nfjd" else False,
+        "client_compute_mode": client_compute_mode,
+        "recompute_interval": recompute_interval,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
         "hypervolume": round(hv, 6), "pareto_gap": round(pg, 6),
         "avg_relative_improvement": round(avg_ri, 6),
@@ -156,8 +168,8 @@ def _run_single(method, dataset, m, seed, num_rounds=50,
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
 
-    logger.info("[%s] %s: NHV=%.4f RI=%.4f upload/client=%d rescale=%.2f",
-                exp_id, method, hv, avg_ri, upload_per_client, avg_rescale)
+    logger.info("[%s] %s: NHV=%.4f RI=%.4f upload/client=%d rescale=%.2f mode=%s",
+                exp_id, method, hv, avg_ri, upload_per_client, avg_rescale, client_compute_mode)
     return row
 
 
@@ -171,34 +183,51 @@ def _write_csv(csv_path, rows):
 
 
 def main():
-    SEEDS = [7, 42, 123]
-    METHODS = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
-    M_VALUES = [2, 3, 5]
+    parser = argparse.ArgumentParser(description="Run NFJD Phase 1 baseline verification.")
+    parser.add_argument(
+        "--client-compute-mode",
+        choices=("full_loader", "single_batch"),
+        default="full_loader",
+        help="How non-NFJD baselines compute local Jacobians. full_loader matches NFJD's local workload more fairly.",
+    )
+    args = parser.parse_args()
+
+    seeds = [7, 42, 123]
+    methods = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
+    m_values = [2, 3, 5]
     all_rows = []
     experiments = []
 
-    for m in M_VALUES:
-        for method in METHODS:
-            for seed in SEEDS:
-                experiments.append(dict(method=method, dataset="synthetic_regression",
-                    m=m, seed=seed, num_rounds=50, model_size="small", local_epochs=3))
+    for m in m_values:
+        for method in methods:
+            for seed in seeds:
+                experiments.append(dict(
+                    method=method,
+                    dataset="synthetic_regression",
+                    m=m,
+                    seed=seed,
+                    num_rounds=50,
+                    model_size="small",
+                    local_epochs=3,
+                    client_compute_mode=args.client_compute_mode,
+                ))
 
     total = len(experiments)
-    logger.info(f"Starting NFJD Phase 1 Baseline Verification: {total} experiments")
+    logger.info("Starting NFJD Phase 1 Baseline Verification: %d experiments, client_compute_mode=%s", total, args.client_compute_mode)
 
     for idx, exp in enumerate(experiments):
-        logger.info(f"[{idx+1}/{total}] Running {exp}...")
+        logger.info("[%d/%d] Running %s...", idx + 1, total, exp)
         try:
             row = _run_single(**exp)
             all_rows.append(row)
-        except Exception as e:
-            logger.error(f"Experiment failed: {e}")
+        except Exception as exc:
+            logger.error("Experiment failed: %s", exc)
             import traceback
             traceback.print_exc()
 
     csv_path = RESULTS_DIR / "phase1_results.csv"
     _write_csv(csv_path, all_rows)
-    logger.info(f"Phase 1 complete! {len(all_rows)}/{total} experiments, saved to {csv_path}")
+    logger.info("Phase 1 complete! %d/%d experiments, saved to %s", len(all_rows), total, csv_path)
 
 
 if __name__ == "__main__":

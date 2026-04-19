@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import copy
 import random
@@ -48,7 +48,7 @@ class NFJDServer:
         global_momentum_beta: float = 0.9,
         conflict_aware_momentum: bool = False,
         momentum_min_beta: float = 0.1,
-        parallel_clients: bool = True,
+        parallel_clients: bool | None = None,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -62,7 +62,7 @@ class NFJDServer:
             min_beta=momentum_min_beta,
         )
         self.conflict_aware_momentum = conflict_aware_momentum
-        self.parallel_clients = parallel_clients
+        self.parallel_clients = device.type != "cuda" if parallel_clients is None else parallel_clients
 
     def sample_clients(self) -> list[NFJDClient]:
         sample_size = max(int(len(self.clients) * self.participation_rate), 1)
@@ -174,3 +174,4 @@ class NFJDServer:
             effective_global_beta=effective_beta,
             method_name="nfjd",
         )
+

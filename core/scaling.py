@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import random
 
 import torch
 
-from fedjd.aggregators import MinNormAggregator
+from fedjd.aggregators import MinNormAggregator, _project_simplex
 
 
 class AdaptiveRescaling:
@@ -15,9 +15,9 @@ class AdaptiveRescaling:
 
     def __call__(self, direction: torch.Tensor, jacobian: torch.Tensor) -> torch.Tensor:
         mean_grad = jacobian.mean(dim=0)
-        N_raw = float(torch.norm(mean_grad, p=2).item())
-        N_d = float(torch.norm(direction, p=2).item()) + self.epsilon
-        scale = min(N_raw / N_d, self.max_scale)
+        raw_norm = float(torch.norm(mean_grad, p=2).item())
+        direction_norm = float(torch.norm(direction, p=2).item()) + self.epsilon
+        scale = min(raw_norm / direction_norm, self.max_scale)
         self.last_scale = scale
         return direction * scale
 
@@ -29,43 +29,75 @@ class StochasticGramianSolver:
         self.lr = lr
         self.rng = random.Random(seed)
         self.last_indices: list[int] = []
+        self._last_lambda: torch.Tensor | None = None
+
+    def sample_indices(self, num_objectives: int) -> list[int]:
+        if num_objectives <= self.subset_size:
+            return list(range(num_objectives))
+        return sorted(self.rng.sample(range(num_objectives), self.subset_size))
+
+    def solve_sampled(
+        self,
+        sampled_jacobian: torch.Tensor,
+        total_objectives: int,
+        sampled_indices: list[int],
+    ) -> tuple[torch.Tensor, list[int]]:
+        if sampled_jacobian.ndim != 2:
+            raise ValueError("Jacobian must have shape [num_objectives, num_params].")
+
+        sampled_count = sampled_jacobian.shape[0]
+        if sampled_count == 0:
+            raise ValueError("At least one objective must be sampled.")
+
+        if sampled_count == 1:
+            lambdas = torch.ones(1, dtype=sampled_jacobian.dtype, device=sampled_jacobian.device)
+        else:
+            sub_gramian = sampled_jacobian @ sampled_jacobian.T
+            lambdas = torch.full(
+                (sampled_count,),
+                1.0 / sampled_count,
+                dtype=sampled_jacobian.dtype,
+                device=sampled_jacobian.device,
+            )
+            for _ in range(self.max_iters):
+                gradient = sub_gramian @ lambdas
+                candidate = _project_simplex(lambdas - self.lr * gradient)
+                if torch.norm(candidate - lambdas, p=2) <= 1e-8:
+                    lambdas = candidate
+                    break
+                lambdas = candidate
+
+        full_lambda = torch.zeros(
+            total_objectives,
+            dtype=sampled_jacobian.dtype,
+            device=sampled_jacobian.device,
+        )
+        for i, idx in enumerate(sampled_indices):
+            full_lambda[idx] = lambdas[i]
+
+        direction = sampled_jacobian.T @ lambdas
+        self.last_lambda = full_lambda
+        self.last_indices = list(sampled_indices)
+        return direction, self.last_indices
 
     def solve(self, jacobian: torch.Tensor) -> tuple[torch.Tensor, list[int]]:
+        if jacobian.ndim != 2:
+            raise ValueError("Jacobian must have shape [num_objectives, num_params].")
+
         m = jacobian.shape[0]
         if m <= self.subset_size:
             aggregator = MinNormAggregator(max_iters=self.max_iters, lr=self.lr)
             direction = aggregator(jacobian)
             self.last_indices = list(range(m))
+            self.last_lambda = torch.ones(m, dtype=jacobian.dtype, device=jacobian.device) / max(m, 1)
             return direction, self.last_indices
 
-        indices = sorted(self.rng.sample(range(m), self.subset_size))
-        sub_jacobian = jacobian[indices]
-
-        # 内部MinNorm计算，同时得到lambda
-        sub_gramian = sub_jacobian @ sub_jacobian.T
-        lambdas = torch.full((self.subset_size,), 1.0 / self.subset_size, dtype=jacobian.dtype, device=jacobian.device)
-        for _ in range(self.max_iters):
-            gradient = sub_gramian @ lambdas
-            from fedjd.aggregators import _project_simplex
-            candidate = _project_simplex(lambdas - self.lr * gradient)
-            if torch.norm(candidate - lambdas, p=2) <= 1e-8:
-                lambdas = candidate
-                break
-            lambdas = candidate
-
-        # 将子集lambda扩展到完整空间
-        full_lambda = torch.zeros(m, dtype=jacobian.dtype, device=jacobian.device)
-        for i, idx in enumerate(indices):
-            full_lambda[idx] = lambdas[i]
-
-        direction = jacobian.T @ full_lambda
-        self.last_lambda = full_lambda
-        self.last_indices = indices
-        return direction, indices
+        indices = self.sample_indices(m)
+        return self.solve_sampled(jacobian[indices], total_objectives=m, sampled_indices=indices)
 
     @property
     def last_lambda(self) -> torch.Tensor | None:
-        return getattr(self, '_last_lambda', None)
+        return self._last_lambda
 
     @last_lambda.setter
     def last_lambda(self, value: torch.Tensor):

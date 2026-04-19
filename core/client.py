@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
@@ -47,11 +47,21 @@ def _measure_peak_memory() -> float:
 
 
 class FedJDClient:
-    def __init__(self, client_id: int, dataset: Dataset, batch_size: int, device: torch.device) -> None:
+    def __init__(
+        self,
+        client_id: int,
+        dataset: Dataset,
+        batch_size: int,
+        device: torch.device,
+        use_full_loader: bool = False,
+        local_epochs: int = 1,
+    ) -> None:
         self.client_id = client_id
         self.dataset = dataset
         self.batch_size = batch_size
         self.device = device
+        self.use_full_loader = use_full_loader
+        self.local_epochs = local_epochs
 
     @property
     def num_examples(self) -> int:
@@ -63,24 +73,43 @@ class FedJDClient:
         start = time.time()
 
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
-        batch_inputs, batch_targets = next(iter(loader))
-        batch_inputs = batch_inputs.to(self.device)
-        batch_targets = batch_targets.to(self.device)
+        jacobian_sum = None
+        total_weight = 0
+        epoch_count = self.local_epochs if self.use_full_loader else 1
 
-        model.zero_grad(set_to_none=True)
-        predictions = model(batch_inputs)
-        objective_values = objective_fn(predictions, batch_targets, batch_inputs)
+        for _ in range(epoch_count):
+            for batch_inputs, batch_targets in loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
 
-        rows = []
-        for index, objective in enumerate(objective_values):
-            retain_graph = index < len(objective_values) - 1
-            model.zero_grad(set_to_none=True)
-            objective.backward(retain_graph=retain_graph)
-            rows.append(flatten_gradients(model.parameters()))
+                model.zero_grad(set_to_none=True)
+                predictions = model(batch_inputs)
+                objective_values = objective_fn(predictions, batch_targets, batch_inputs)
 
-        jacobian = torch.stack(rows, dim=0)
-        model.zero_grad(set_to_none=True)
+                rows = []
+                for index, objective in enumerate(objective_values):
+                    retain_graph = index < len(objective_values) - 1
+                    model.zero_grad(set_to_none=True)
+                    objective.backward(retain_graph=retain_graph)
+                    rows.append(flatten_gradients(model.parameters()))
 
+                batch_jacobian = torch.stack(rows, dim=0)
+                model.zero_grad(set_to_none=True)
+
+                batch_weight = int(batch_inputs.shape[0])
+                if jacobian_sum is None:
+                    jacobian_sum = batch_jacobian * batch_weight
+                else:
+                    jacobian_sum.add_(batch_jacobian, alpha=batch_weight)
+                total_weight += batch_weight
+
+                if not self.use_full_loader:
+                    break
+
+        if jacobian_sum is None or total_weight == 0:
+            raise RuntimeError("No batch available to compute Jacobian.")
+
+        jacobian = jacobian_sum / total_weight
         compute_time = time.time() - start
 
         serialize_start = time.time()
