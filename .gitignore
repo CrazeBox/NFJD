@@ -9,3 +9,6 @@ build/
 *.log
 results/
 *.png
+data/multimnist/MNIST/
+data/celeba/
+data/river_flow/

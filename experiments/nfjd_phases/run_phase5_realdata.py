@@ -407,6 +407,11 @@ def main():
             logger.error(f"Experiment failed: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     csv_path = RESULTS_DIR / "phase5_results.csv"
     _write_csv(csv_path, all_rows)
