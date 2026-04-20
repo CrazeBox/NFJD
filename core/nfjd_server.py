@@ -10,9 +10,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from fedjd.aggregators import MinNormAggregator
 from fedjd.core.scaling import GlobalMomentum
 
-from .nfjd_client import NFJDClient, ObjectiveFn, flatten_parameters, assign_flat_parameters
+from .nfjd_client import NFJDClient, ObjectiveFn, flatten_parameters, assign_flat_parameters, flatten_gradients
 
 
 @dataclass
@@ -130,11 +131,23 @@ class NFJDServer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        delta_thetas = []
+        align_scores_list = []
+        sampled_ids = []
+        total_upload = 0
+        rescale_factors = []
+        local_epochs_list = []
+        cosine_sims = []
+
         for result in results:
             weight = result.num_examples / total_examples
-            delta_thetas.append((result.delta_theta.to(self.device) * weight, weight))
+            delta_thetas.append((result.delta_theta.to(self.device), weight))
+            if result.align_scores is not None:
+                align_scores_list.append((result.align_scores.to(self.device), weight))
             sampled_ids.append(result.client_id)
             total_upload += result.delta_theta.numel() * result.delta_theta.element_size()
+            if result.align_scores is not None:
+                total_upload += result.align_scores.numel() * result.align_scores.element_size()
             rescale_factors.append(result.rescale_factor)
             local_epochs_list.append(result.num_local_epochs)
             cosine_sims.append(result.avg_cosine_sim)
@@ -142,7 +155,36 @@ class NFJDServer:
         client_compute_time = time.time() - client_start
 
         agg_start = time.time()
-        aggregated_delta = sum(dt for dt, _ in delta_thetas)
+        
+        # 计算全局对齐分数
+        global_align = None
+        if align_scores_list:
+            global_align = sum(align * weight for align, weight in align_scores_list)
+        
+        # 调整客户端权重
+        adjusted_weights = []
+        for i, (delta, weight) in enumerate(delta_thetas):
+            if align_scores_list and global_align is not None:
+                # 获取当前客户端的对齐分数
+                client_align = align_scores_list[i][0]
+                # 计算权重调整因子：对被普遍伤害的目标，增加对其友好的客户端权重
+                adjustment = 1.0
+                for j in range(len(client_align)):
+                    if global_align[j] < 0:  # 目标被普遍伤害
+                        if client_align[j] > 0:  # 当前客户端对该目标友好
+                            adjustment *= 1.5  # 增加权重
+                adjusted_weights.append((delta, weight * adjustment))
+            else:
+                adjusted_weights.append((delta, weight))
+        
+        # 归一化调整后的权重
+        total_adjusted_weight = sum(w for _, w in adjusted_weights)
+        if total_adjusted_weight > 0:
+            adjusted_weights = [(delta, w / total_adjusted_weight) for delta, w in adjusted_weights]
+        
+        # 基于调整后的权重聚合 delta_theta
+        aggregated_delta = sum(delta * weight for delta, weight in adjusted_weights)
+        
         aggregation_time = time.time() - agg_start
 
         avg_cosine_sim = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0

@@ -55,6 +55,8 @@ class ClientResult:
     rescale_factor: float = 1.0
     sampled_indices: list[int] | None = None
     avg_cosine_sim: float = 0.0
+    jacobian: torch.Tensor | None = None
+    align_scores: torch.Tensor | None = None
 
 
 class NFJDClient:
@@ -71,12 +73,12 @@ class NFJDClient:
         stochastic_subset_size: int = 4,
         stochastic_seed: int | None = None,
         use_adaptive_rescaling: bool = True,
-        rescaling_max_scale: float = 10.0,
+        rescaling_max_scale: float = 5.0,
         minnorm_max_iters: int = 250,
         minnorm_lr: float = 0.1,
-        conflict_aware_momentum: bool = False,
+        conflict_aware_momentum: bool = True,
         momentum_min_beta: float = 0.1,
-        recompute_interval: int = 2,
+        recompute_interval: int = 4,
         use_mixed_precision: bool = True,
     ) -> None:
         self.client_id = client_id
@@ -246,6 +248,10 @@ class NFJDClient:
         delta_theta = theta_final - theta_init
         compute_time = time.time() - start
 
+        align_scores = None
+        if 'jacobian' in locals() and jacobian is not None:
+            align_scores = jacobian @ delta_theta
+
         return ClientResult(
             client_id=self.client_id,
             delta_theta=delta_theta.detach().clone(),
@@ -256,6 +262,8 @@ class NFJDClient:
             rescale_factor=last_rescale_factor,
             sampled_indices=sampled_indices,
             avg_cosine_sim=avg_cosine_sim,
+            jacobian=jacobian.detach().clone() if 'jacobian' in locals() else None,
+            align_scores=align_scores.detach().clone() if align_scores is not None else None,
         )
 
     def evaluate_objectives(self, model: nn.Module, objective_fn: ObjectiveFn) -> list[float]:
