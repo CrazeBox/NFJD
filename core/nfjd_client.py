@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+﻿﻿from __future__ import annotations
 
 import time
 from dataclasses import dataclass
@@ -269,6 +269,8 @@ class NFJDClient:
                 predictions = model(batch_inputs)
                 values = objective_fn(predictions, batch_targets, batch_inputs)
                 stacked = torch.stack([v.detach() for v in values])
+                if stacked.dim() == 1:
+                    stacked = stacked.unsqueeze(1)
                 if all_values is None:
                     all_values = stacked
                 else:

@@ -261,7 +261,10 @@ class FedJDServer:
                     predictions = self.model(batch_inputs)
                     values = self.objective_fn(predictions, batch_targets, batch_inputs)
                     stacked = torch.stack([value.detach() for value in values])
-                    client_values.append(stacked.mean(dim=1))
+                    if stacked.dim() == 2:
+                        client_values.append(stacked.mean(dim=1))
+                    else:
+                        client_values.append(stacked)
                 if client_values:
                     avg_values = torch.stack(client_values).mean(dim=0)
                     weight = client.num_examples / total_examples
