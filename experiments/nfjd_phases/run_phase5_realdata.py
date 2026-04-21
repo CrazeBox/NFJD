@@ -131,7 +131,8 @@ def _run_celeba(method, seed, iid=True, num_rounds=50,
 
     # Create CelebA dataset
     train_datasets, val_datasets, test_datasets = make_celeba(
-        num_clients=num_clients, iid=iid, seed=seed, num_tasks=num_tasks
+        num_clients=num_clients, iid=iid, seed=seed, num_tasks=num_tasks,
+        root="/root/data/celeba/celeba", download=False
     )
     
     data = {

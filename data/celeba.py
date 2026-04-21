@@ -1,15 +1,88 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Subset
-from torchvision import datasets, transforms
-from torchvision.datasets import CelebA
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+class LocalCelebA(Dataset):
+    def __init__(self, root: str, split: str, transform=None):
+        self.root = root
+        self.split = split
+        self.transform = transform
+
+        attr_path = os.path.join(root, "list_attr_celeba.txt")
+        partition_path = os.path.join(root, "list_eval_partition.txt")
+        img_dir = os.path.join(root, "img_align_celeba")
+
+        if not os.path.isdir(img_dir):
+            img_dir = os.path.join(root, "celeba", "img_align_celeba")
+        if not os.path.isdir(img_dir):
+            raise FileNotFoundError(
+                f"Cannot find img_align_celeba/ under {root} or {root}/celeba"
+            )
+
+        with open(attr_path, "r") as f:
+            lines = f.readlines()
+        num_imgs = int(lines[0].strip())
+        attr_names = lines[1].strip().split()
+        self.attr_names = attr_names
+
+        attr_data = {}
+        for line in lines[2:]:
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            filename = parts[0]
+            attrs = [(1 if int(x) == 1 else 0) for x in parts[1:]]
+            attr_data[filename] = attrs
+
+        split_map = {"train": 0, "valid": 1, "test": 2}
+        target_split = split_map.get(split, 0)
+
+        partition = {}
+        with open(partition_path, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                filename = parts[0]
+                s = int(parts[1])
+                partition[filename] = s
+
+        self.filenames = []
+        self.attr_list = []
+        for fname, s in partition.items():
+            if s == target_split and fname in attr_data:
+                self.filenames.append(fname)
+                self.attr_list.append(attr_data[fname])
+
+        self.attr = torch.tensor(self.attr_list, dtype=torch.float32)
+        self.img_dir = img_dir
+
+        logger.info(
+            "LocalCelebA: split=%s, %d images, %d attributes from %s",
+            split, len(self.filenames), len(self.attr_names), root,
+        )
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_dir, self.filenames[idx])
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        attrs = self.attr[idx]
+        return image, attrs
 
 
 def make_celeba(
@@ -30,15 +103,9 @@ def make_celeba(
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
-    train_dataset = CelebA(
-        root=root, split="train", transform=transform, download=download,
-    )
-    val_dataset = CelebA(
-        root=root, split="valid", transform=transform, download=download,
-    )
-    test_dataset = CelebA(
-        root=root, split="test", transform=transform, download=download,
-    )
+    train_dataset = LocalCelebA(root=root, split="train", transform=transform)
+    val_dataset = LocalCelebA(root=root, split="valid", transform=transform)
+    test_dataset = LocalCelebA(root=root, split="test", transform=transform)
 
     attributes = train_dataset.attr_names
     selected_attributes = attributes[:num_tasks]
