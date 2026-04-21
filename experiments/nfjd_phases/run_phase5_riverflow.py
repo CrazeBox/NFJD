@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from fedjd.data.river_flow import make_river_flow
 from fedjd.models.river_flow_mlp import RiverFlowMLP
 from fedjd.problems import multi_objective_regression
-from phase5_utils import run_experiment, evaluate_model, write_csv, cleanup
+from fedjd.experiments.nfjd_phases.phase5_utils import run_experiment, evaluate_model, write_csv, cleanup
 
 RESULTS_DIR = Path("results/nfjd_phase5/riverflow")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
