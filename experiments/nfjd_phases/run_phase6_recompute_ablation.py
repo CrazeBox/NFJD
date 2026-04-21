@@ -18,7 +18,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_synthetic_federated_regression, make_high_conflict_federated_regression
-from fedjd.metrics import extract_pareto_front, hypervolume
+from fedjd.metrics import jain_fairness_index, min_max_gap
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -90,20 +90,6 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
     obj_history = [s.objective_values for s in history]
     all_decreased = all(final_obj[j] <= initial_obj[j] for j in range(m))
 
-    min_vals = [min(h[j] for h in obj_history) for j in range(m)]
-    max_vals = [max(h[j] for h in obj_history) for j in range(m)]
-    ranges = [max(max_vals[j] - min_vals[j], 1e-10) for j in range(m)]
-
-    normalized_history = [[(h[j] - min_vals[j]) / ranges[j] for j in range(m)] for h in obj_history]
-    ref_point = [1.1] * m
-    pareto_front = extract_pareto_front(normalized_history)
-    raw_hv = hypervolume(pareto_front, ref_point)
-    max_possible_hv = 1.1 ** m
-    hv = raw_hv / max_possible_hv if max_possible_hv > 0 else 0.0
-
-    normalized_final = [(final_obj[j] - min_vals[j]) / ranges[j] for j in range(m)]
-    pg = sum(normalized_final) / m
-
     ri_sum = 0.0
     for j in range(m):
         if abs(initial_obj[j]) > 1e-10:
@@ -125,7 +111,7 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
         "all_decreased": all_decreased,
         "hypervolume": round(hv, 6),
         "pareto_gap": round(pg, 6),
-        "avg_relative_improvement": round(avg_ri, 6),
+        "avg_ri": round(avg_ri, 6),
         "avg_round_time": round(avg_round_time, 4),
     }
     for i in range(MAX_M):
@@ -140,7 +126,7 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
 
     speedup = 1.0
     logger.info(
-        "[%s] RI=%.4f NHV=%.4f time=%.1fs round_time=%.4fs",
+        "[%s] RI=%.4f JFI= time=%.1fs round_time=%.4fs",
         exp_id, avg_ri, hv, elapsed, avg_round_time,
     )
     return row
@@ -200,13 +186,13 @@ def main():
         if not ri_rows:
             continue
         avg_ri = sum(r["avg_relative_improvement"] for r in ri_rows) / len(ri_rows)
-        avg_hv = sum(r["hypervolume"] for r in ri_rows) / len(ri_rows)
+        avg_jfi = sum(r["hypervolume"] for r in ri_rows) / len(ri_rows)
         avg_time = sum(r["elapsed_time"] for r in ri_rows) / len(ri_rows)
         avg_rt = sum(r["avg_round_time"] for r in ri_rows) / len(ri_rows)
         all_decr_pct = sum(1 for r in ri_rows if r["all_decreased"]) / len(ri_rows)
         speedup = avg_time / (sum(r["elapsed_time"] for r in all_rows if r["recompute_interval"] == 1) / len([r for r in all_rows if r["recompute_interval"] == 1])) if ri != 1 else 1.0
         logger.info(
-            f"RI={ri:2d}: avg_RI={avg_ri:.4f}, avg_HV={avg_hv:.4f}, "
+            f"RI={ri:2d}: avg_RI={avg_ri:.4f}, avg_JFI={avg_jfi:.4f}, "
             f"avg_time={avg_time:.1f}s, avg_round={avg_rt:.4f}s, "
             f"all_decr={all_decr_pct:.0%}, speedup={1.0 if ri == 1 else avg_time / (sum(r['elapsed_time'] for r in all_rows if r['recompute_interval'] == 1) / max(len([r for r in all_rows if r['recompute_interval'] == 1]), 1)):.2f}x"
         )

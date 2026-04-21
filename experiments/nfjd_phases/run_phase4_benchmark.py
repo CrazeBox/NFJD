@@ -20,7 +20,7 @@ from fedjd.data import (
     make_federated_classification, make_high_conflict_federated_regression,
     make_synthetic_federated_regression,
 )
-from fedjd.metrics import extract_pareto_front, hypervolume
+from fedjd.metrics import jain_fairness_index, min_max_gap
 from fedjd.models import MODEL_REGISTRY, MultiTaskClassifier
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
@@ -95,23 +95,6 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
     obj_history = [s.objective_values for s in history]
     all_decreased = all(final_obj[j] <= initial_obj[j] for j in range(m))
 
-    min_vals = [min(h[j] for h in obj_history) for j in range(m)]
-    max_vals = [max(h[j] for h in obj_history) for j in range(m)]
-    ranges = [max_vals[j] - min_vals[j] for j in range(m)]
-    for j in range(m):
-        if ranges[j] < 1e-10:
-            ranges[j] = 1.0
-
-    normalized_history = [[(h[j] - min_vals[j]) / ranges[j] for j in range(m)] for h in obj_history]
-    ref_point = [1.1] * m
-    pareto_front = extract_pareto_front(normalized_history)
-    raw_hv = hypervolume(pareto_front, ref_point)
-    max_possible_hv = 1.1 ** m
-    hv = raw_hv / max_possible_hv if max_possible_hv > 0 else 0.0
-
-    normalized_final = [(final_obj[j] - min_vals[j]) / ranges[j] for j in range(m)]
-    pg = sum(normalized_final) / m
-
     ri_sum = 0.0
     for j in range(m):
         if abs(initial_obj[j]) > 1e-10:
@@ -149,8 +132,8 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
         "use_stochastic_gramian": method == "nfjd",
         "conflict_aware_momentum": False,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
-        "hypervolume": round(hv, 6), "pareto_gap": round(pg, 6),
-        "avg_relative_improvement": round(avg_ri, 6),
+        "task_jfi": 0.0, "task_mmag": 0.0,
+        "avg_ri": round(avg_ri, 6),
         "avg_upload_bytes": round(avg_upload, 0),
         "avg_round_time": round(avg_round_time, 4),
         "upload_per_client": round(upload_per_client, 0),
@@ -170,7 +153,7 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
 
-    logger.info("[%s] %s: RI=%.4f NHV=%.4f steps=%d time=%.1fs", exp_id, method, avg_ri, hv, total_local_steps, elapsed)
+    logger.info("[%s] %s: RI=%.4f JFI= steps=%d time=%.1fs", exp_id, method, avg_ri, total_local_steps, elapsed)
     return row
 
 

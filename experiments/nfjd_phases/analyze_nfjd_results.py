@@ -61,17 +61,17 @@ def main():
             continue
         groups[(m, method)].append(r)
 
-    lines.append("| m | Method | NHV (mean±std) | Avg RI (mean±std) | Upload/Client | Time (s) | Rescale |")
+    lines.append("| m | Method | JFI (mean±std) | Avg RI (mean±std) | Upload/Client | Time (s) | Rescale |")
     lines.append("|---|--------|----------------|-------------------|---------------|----------|---------|")
     for key in sorted(groups.keys()):
         m, method = key
         rs = groups[key]
-        hv_vals = [_sf(r.get("hypervolume")) for r in rs]
-        ri_vals = [_sf(r.get("avg_relative_improvement")) for r in rs]
+        jfi_vals = [_sf(r.get("task_jfi")) for r in rs]
+        ri_vals = [_sf(r.get("avg_ri")) for r in rs]
         up_vals = [_sf(r.get("upload_per_client")) for r in rs]
         time_vals = [_sf(r.get("elapsed_time")) for r in rs]
         rescale_vals = [_sf(r.get("avg_rescale_factor")) for r in rs]
-        lines.append(f"| {m} | {method} | {_mean(hv_vals):.4f}±{_std(hv_vals):.4f} | "
+        lines.append(f"| {m} | {method} | {_mean(jfi_vals):.4f}±{_std(jfi_vals):.4f} | "
                      f"{_mean(ri_vals):.4f}±{_std(ri_vals):.4f} | {_mean(up_vals):.0f} | "
                      f"{_mean(time_vals):.1f} | {_mean(rescale_vals):.2f} |")
 
@@ -88,17 +88,17 @@ def main():
             continue
         hc_groups[(m, method)].append(r)
 
-    lines.append("| m | Method | NHV (mean±std) | Avg RI (mean±std) | Upload/Client | Time (s) | Rescale |")
+    lines.append("| m | Method | JFI (mean±std) | Avg RI (mean±std) | Upload/Client | Time (s) | Rescale |")
     lines.append("|---|--------|----------------|-------------------|---------------|----------|---------|")
     for key in sorted(hc_groups.keys()):
         m, method = key
         rs = hc_groups[key]
-        hv_vals = [_sf(r.get("hypervolume")) for r in rs]
-        ri_vals = [_sf(r.get("avg_relative_improvement")) for r in rs]
+        jfi_vals = [_sf(r.get("task_jfi")) for r in rs]
+        ri_vals = [_sf(r.get("avg_ri")) for r in rs]
         up_vals = [_sf(r.get("upload_per_client")) for r in rs]
         time_vals = [_sf(r.get("elapsed_time")) for r in rs]
         rescale_vals = [_sf(r.get("avg_rescale_factor")) for r in rs]
-        lines.append(f"| {m} | {method} | {_mean(hv_vals):.4f}±{_std(hv_vals):.4f} | "
+        lines.append(f"| {m} | {method} | {_mean(jfi_vals):.4f}±{_std(jfi_vals):.4f} | "
                      f"{_mean(ri_vals):.4f}±{_std(ri_vals):.4f} | {_mean(up_vals):.0f} | "
                      f"{_mean(time_vals):.1f} | {_mean(rescale_vals):.2f} |")
 
@@ -115,15 +115,15 @@ def main():
         label = "NFJD+AR" if ar == "True" else "NFJD (no AR)"
         ablation_groups[(m, label)].append(r)
 
-    lines.append("| m | Config | NHV (mean±std) | Avg RI (mean±std) | Rescale |")
+    lines.append("| m | Config | JFI (mean±std) | Avg RI (mean±std) | Rescale |")
     lines.append("|---|--------|----------------|-------------------|---------|")
     for key in sorted(ablation_groups.keys()):
         m, label = key
         rs = ablation_groups[key]
-        hv_vals = [_sf(r.get("hypervolume")) for r in rs]
-        ri_vals = [_sf(r.get("avg_relative_improvement")) for r in rs]
+        jfi_vals = [_sf(r.get("task_jfi")) for r in rs]
+        ri_vals = [_sf(r.get("avg_ri")) for r in rs]
         rescale_vals = [_sf(r.get("avg_rescale_factor")) for r in rs]
-        lines.append(f"| {m} | {label} | {_mean(hv_vals):.4f}±{_std(hv_vals):.4f} | "
+        lines.append(f"| {m} | {label} | {_mean(jfi_vals):.4f}±{_std(jfi_vals):.4f} | "
                      f"{_mean(ri_vals):.4f}±{_std(ri_vals):.4f} | {_mean(rescale_vals):.2f} |")
 
     # Key findings
@@ -133,17 +133,17 @@ def main():
     fedjd_ri_syn = []
     for r in rows:
         if _sf(r.get("conflict_strength")) == 0.0 and r.get("method") == "nfjd":
-            nfjd_ri_syn.append(_sf(r.get("avg_relative_improvement")))
+            nfjd_ri_syn.append(_sf(r.get("avg_ri")))
         elif _sf(r.get("conflict_strength")) == 0.0 and r.get("method") == "fedjd":
-            fedjd_ri_syn.append(_sf(r.get("avg_relative_improvement")))
+            fedjd_ri_syn.append(_sf(r.get("avg_ri")))
 
     nfjd_ri_hc = []
     fedjd_ri_hc = []
     for r in rows:
         if _sf(r.get("conflict_strength")) == 1.0 and r.get("method") == "nfjd" and r.get("use_adaptive_rescaling") == "True":
-            nfjd_ri_hc.append(_sf(r.get("avg_relative_improvement")))
+            nfjd_ri_hc.append(_sf(r.get("avg_ri")))
         elif _sf(r.get("conflict_strength")) == 1.0 and r.get("method") == "fedjd":
-            fedjd_ri_hc.append(_sf(r.get("avg_relative_improvement")))
+            fedjd_ri_hc.append(_sf(r.get("avg_ri")))
 
     lines.append(f"### NFJD vs FedJD\n")
     if nfjd_ri_syn and fedjd_ri_syn:

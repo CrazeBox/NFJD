@@ -13,7 +13,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
-from fedjd.metrics import extract_pareto_front, hypervolume
+from fedjd.metrics import jain_fairness_index, min_max_gap
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -99,18 +99,6 @@ def run_one(
     final_obj = history[-1].objective_values
     obj_history = [s.objective_values for s in history]
 
-    min_vals = [min(h[j] for h in obj_history) for j in range(num_objectives)]
-    max_vals = [max(h[j] for h in obj_history) for j in range(num_objectives)]
-    ranges = [max(max_vals[j] - min_vals[j], 1e-10) for j in range(num_objectives)]
-
-    normalized_history = [
-        [(h[j] - min_vals[j]) / ranges[j] for j in range(num_objectives)]
-        for h in obj_history
-    ]
-    pareto_front = extract_pareto_front(normalized_history)
-    raw_hv = hypervolume(pareto_front, [1.1] * num_objectives)
-    hv = raw_hv / (1.1 ** num_objectives)
-
     ri_sum = 0.0
     for j in range(num_objectives):
         if abs(init_obj[j]) > 1e-10:
@@ -128,7 +116,7 @@ def run_one(
         "m": num_objectives,
         "seed": seed,
         "avg_ri": avg_ri,
-        "hv": hv,
+        "task_jfi": 0.0, "task_mmag": 0.0,
         "all_decr": all_decreased,
         "elapsed": elapsed,
         "avg_rt": avg_round_time,
@@ -187,7 +175,7 @@ def main() -> None:
                         )
                         results.append(result)
                         log(
-                            f"  RI={result['avg_ri']:.4f} HV={result['hv']:.4f} "
+                            f"  RI={result['avg_ri']:.4f} JFI={result['hv']:.4f} "
                             f"time={result['elapsed']:.1f}s round={result['avg_rt']:.3f}s decr={result['all_decr']}"
                         )
                     except Exception as exc:
@@ -205,7 +193,7 @@ def main() -> None:
         if not rows:
             continue
         avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-        avg_hv = sum(r["hv"] for r in rows) / len(rows)
+        avg_jfi = sum(r["hv"] for r in rows) / len(rows)
         avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
         avg_elapsed = sum(r["elapsed"] for r in rows) / len(rows)
         decr_pct = sum(1 for r in rows if r["all_decr"]) / len(rows)
@@ -214,7 +202,7 @@ def main() -> None:
             speedup = 1.0
         else:
             speedup = (base_elapsed / avg_elapsed) if base_elapsed and avg_elapsed > 0 else 0.0
-        log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_hv:>8.4f} | {avg_rt:>10.4f} | {avg_elapsed:>11.1f} | {decr_pct:>5.0%} | {speedup:>7.2f}x")
+        log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_jfi:>8.4f} | {avg_rt:>10.4f} | {avg_elapsed:>11.1f} | {decr_pct:>5.0%} | {speedup:>7.2f}x")
 
     log("\n" + "=" * 100)
     log("PER-SCENARIO BREAKDOWN")
@@ -230,14 +218,14 @@ def main() -> None:
                 if not rows:
                     continue
                 avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-                avg_hv = sum(r["hv"] for r in rows) / len(rows)
+                avg_jfi = sum(r["hv"] for r in rows) / len(rows)
                 avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
                 if recompute_interval == args.recompute_intervals[0]:
                     base_rt = avg_rt
                     speedup = 1.0
                 else:
                     speedup = (base_rt / avg_rt) if base_rt and avg_rt > 0 else 0.0
-                log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_hv:>8.4f} | {avg_rt:>10.4f} | {speedup:>7.2f}x")
+                log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_jfi:>8.4f} | {avg_rt:>10.4f} | {speedup:>7.2f}x")
 
     log("\n" + "=" * 100)
     log("EXPLORATION COMPLETE")

@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from fedjd.data.multimnist import make_multimnist
 from fedjd.models.lenet_mtl import LeNetMTL
 from fedjd.problems import multi_task_classification
-from fedjd.experiments.nfjd_phases.phase5_utils import compute_accuracy, run_experiment, evaluate_model, write_csv, cleanup
+from fedjd.experiments.nfjd_phases.phase5_utils import (
+    run_experiment, evaluate_model, fill_classification_metrics, write_csv, cleanup,
+)
 
 RESULTS_DIR = Path("results/nfjd_phase5/multimnist")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,10 +60,7 @@ def run_multimnist(method, seed, iid=True, num_rounds=50,
     )
 
     all_preds, all_targets = evaluate_model(model, data["test_dataset"], device)
-    accs = compute_accuracy(all_preds, all_targets, 2)
-    row["task_L_acc"] = round(accs[0], 4)
-    row["task_R_acc"] = round(accs[1], 4)
-    row["avg_accuracy"] = round(sum(accs) / 2, 4)
+    row = fill_classification_metrics(row, all_preds, all_targets, 2)
 
     return row
 

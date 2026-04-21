@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from fedjd.data.river_flow import make_river_flow
 from fedjd.models.river_flow_mlp import RiverFlowMLP
 from fedjd.problems import multi_objective_regression
-from fedjd.experiments.nfjd_phases.phase5_utils import run_experiment, evaluate_model, write_csv, cleanup
+from fedjd.experiments.nfjd_phases.phase5_utils import (
+    run_experiment, evaluate_model, fill_regression_metrics, write_csv, cleanup,
+)
 
 RESULTS_DIR = Path("results/nfjd_phase5/riverflow")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,15 +61,7 @@ def run_riverflow(method, seed, iid=True, num_rounds=50,
     )
 
     all_preds, all_targets = evaluate_model(model, data["test_dataset"], device)
-
-    per_task_mse = []
-    for t in range(num_tasks):
-        mse = ((all_preds[:, t] - all_targets[:, t]) ** 2).mean().item()
-        per_task_mse.append(mse)
-    row["per_task_mse"] = ",".join(f"{v:.6f}" for v in per_task_mse)
-    row["avg_mse"] = round(sum(per_task_mse) / len(per_task_mse), 6)
-    row["max_mse"] = round(max(per_task_mse), 6)
-    row["mse_std"] = round(float(np.std(per_task_mse)), 6)
+    row = fill_regression_metrics(row, all_preds, all_targets, num_tasks)
 
     return row
 

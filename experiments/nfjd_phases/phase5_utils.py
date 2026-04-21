@@ -14,7 +14,10 @@ from fedjd.core import (
     DirectionAvgServer, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
-from fedjd.metrics import extract_pareto_front, hypervolume
+from fedjd.metrics import (
+    jain_fairness_index, min_max_gap, compute_f1_scores,
+    compute_accuracy, compute_mse_per_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,27 +26,17 @@ ALL_FIELDNAMES = [
     "num_clients", "participation_rate", "learning_rate", "local_epochs",
     "use_adaptive_rescaling", "use_stochastic_gramian", "conflict_aware_momentum",
     "model_arch", "total_local_steps", "fair_comparison",
-    "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
-    "avg_relative_improvement", "avg_upload_bytes", "avg_round_time",
-    "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
-    "task_L_acc", "task_R_acc", "avg_accuracy",
-    "per_task_mse", "avg_mse", "max_mse", "mse_std",
+    "elapsed_time", "all_decreased", "avg_ri",
+    "avg_upload_bytes", "avg_round_time", "upload_per_client",
+    "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
+    "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
+    "avg_mse", "max_mse", "mse_std",
 ]
 MAX_M = 10
 for _i in range(MAX_M):
     ALL_FIELDNAMES.extend([f"init_obj_{_i}", f"final_obj_{_i}", f"delta_obj_{_i}"])
-
-
-def compute_accuracy(predictions, targets, num_tasks):
-    correct = [0] * num_tasks
-    total = 0
-    with torch.no_grad():
-        for t in range(num_tasks):
-            pred_labels = predictions[:, t].argmax(dim=-1)
-            true_labels = targets[:, t].long()
-            correct[t] += (pred_labels == true_labels).sum().item()
-        total += predictions.shape[0]
-    return [c / max(total, 1) for c in correct]
+for _i in range(MAX_M):
+    ALL_FIELDNAMES.extend([f"task_{_i}_acc", f"task_{_i}_f1", f"task_{_i}_mse"])
 
 
 def build_trainer(method, model, client_datasets, objective_fn, m, seed,
@@ -107,25 +100,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
 
     initial_obj = history[0].objective_values
     final_obj = history[-1].objective_values
-    obj_history = [s.objective_values for s in history]
     all_decreased = all(final_obj[j] <= initial_obj[j] for j in range(m))
-
-    min_vals = [min(h[j] for h in obj_history) for j in range(m)]
-    max_vals = [max(h[j] for h in obj_history) for j in range(m)]
-    ranges = [max_vals[j] - min_vals[j] for j in range(m)]
-    for j in range(m):
-        if ranges[j] < 1e-10:
-            ranges[j] = 1.0
-
-    normalized_history = [[(h[j] - min_vals[j]) / ranges[j] for j in range(m)] for h in obj_history]
-    ref_point = [1.1] * m
-    pareto_front = extract_pareto_front(normalized_history)
-    raw_hv = hypervolume(pareto_front, ref_point)
-    max_possible_hv = 1.1 ** m
-    hv = raw_hv / max_possible_hv if max_possible_hv > 0 else 0.0
-
-    normalized_final = [(final_obj[j] - min_vals[j]) / ranges[j] for j in range(m)]
-    pg = sum(normalized_final) / m
 
     ri_sum = 0.0
     for j in range(m):
@@ -165,16 +140,15 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "total_local_steps": total_local_steps,
         "fair_comparison": fair_comparison,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
-        "hypervolume": round(hv, 6), "pareto_gap": round(pg, 6),
-        "avg_relative_improvement": round(avg_ri, 6),
+        "avg_ri": round(avg_ri, 6),
         "avg_upload_bytes": round(avg_upload, 0),
         "avg_round_time": round(avg_round_time, 4),
         "upload_per_client": round(upload_per_client, 0),
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine_sim, 4),
         "avg_effective_beta": round(avg_effective_beta, 4),
-        "task_L_acc": "", "task_R_acc": "", "avg_accuracy": "",
-        "per_task_mse": "", "avg_mse": "", "max_mse": "", "mse_std": "",
+        "avg_accuracy": "", "avg_f1": "", "task_jfi": "", "task_mmag": "",
+        "avg_mse": "", "max_mse": "", "mse_std": "",
     }
     for i in range(MAX_M):
         if i < m:
@@ -185,8 +159,12 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
             row[f"init_obj_{i}"] = ""
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
+    for i in range(MAX_M):
+        row[f"task_{i}_acc"] = ""
+        row[f"task_{i}_f1"] = ""
+        row[f"task_{i}_mse"] = ""
 
-    logger.info("[%s] %s: RI=%.4f NHV=%.4f steps=%d time=%.1fs", exp_id, method, avg_ri, hv, total_local_steps, elapsed)
+    logger.info("[%s] %s: RI=%.4f steps=%d time=%.1fs", exp_id, method, avg_ri, total_local_steps, elapsed)
     return row
 
 
@@ -202,6 +180,31 @@ def evaluate_model(model, test_dataset, device, batch_size=256):
             all_preds.append(pred.cpu())
             all_targets.append(by.cpu())
     return torch.cat(all_preds), torch.cat(all_targets)
+
+
+def fill_classification_metrics(row, predictions, targets, m):
+    accs = compute_accuracy(predictions, targets, m)
+    f1s = compute_f1_scores(predictions, targets, m)
+    row["avg_accuracy"] = round(sum(accs) / m, 4)
+    row["avg_f1"] = round(sum(f1s) / m, 4)
+    row["task_jfi"] = round(jain_fairness_index(accs), 4)
+    row["task_mmag"] = round(min_max_gap(accs), 4)
+    for i in range(m):
+        row[f"task_{i}_acc"] = round(accs[i], 4)
+        row[f"task_{i}_f1"] = round(f1s[i], 4)
+    return row
+
+
+def fill_regression_metrics(row, predictions, targets, m):
+    mses = compute_mse_per_task(predictions, targets, m)
+    row["avg_mse"] = round(sum(mses) / m, 6)
+    row["max_mse"] = round(max(mses), 6)
+    row["mse_std"] = round(float(np.std(mses)), 6)
+    row["task_jfi"] = round(jain_fairness_index([1.0 / (ms + 1e-8) for ms in mses]), 4)
+    row["task_mmag"] = round(min_max_gap(mses), 6)
+    for i in range(m):
+        row[f"task_{i}_mse"] = round(mses[i], 6)
+    return row
 
 
 def write_csv(csv_path, rows):

@@ -5,6 +5,60 @@ import random
 import torch
 
 
+def jain_fairness_index(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    n = len(values)
+    sum_vals = sum(values)
+    sum_sq = sum(v ** 2 for v in values)
+    if sum_sq < 1e-15:
+        return 1.0 if sum_vals < 1e-15 else 0.0
+    return (sum_vals ** 2) / (n * sum_sq)
+
+
+def min_max_gap(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return max(values) - min(values)
+
+
+def compute_f1_scores(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    f1_scores = []
+    with torch.no_grad():
+        for t in range(num_tasks):
+            pred_labels = predictions[:, t].argmax(dim=-1)
+            true_labels = targets[:, t].long()
+            tp = ((pred_labels == 1) & (true_labels == 1)).sum().float()
+            fp = ((pred_labels == 1) & (true_labels == 0)).sum().float()
+            fn = ((pred_labels == 0) & (true_labels == 1)).sum().float()
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1_scores.append(f1.item())
+    return f1_scores
+
+
+def compute_accuracy(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    correct = [0] * num_tasks
+    total = 0
+    with torch.no_grad():
+        for t in range(num_tasks):
+            pred_labels = predictions[:, t].argmax(dim=-1)
+            true_labels = targets[:, t].long()
+            correct[t] += (pred_labels == true_labels).sum().item()
+        total += predictions.shape[0]
+    return [c / max(total, 1) for c in correct]
+
+
+def compute_mse_per_task(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    mse_list = []
+    with torch.no_grad():
+        for t in range(num_tasks):
+            mse = ((predictions[:, t] - targets[:, t]) ** 2).mean().item()
+            mse_list.append(mse)
+    return mse_list
+
+
 def hypervolume_2d(points: list[tuple[float, float]], reference: tuple[float, float]) -> float:
     if not points:
         return 0.0
@@ -62,19 +116,6 @@ def _hypervolume_monte_carlo(
     return volume * count / num_samples
 
 
-def pareto_gap(objective_values: list[float], ideal_point: list[float]) -> float:
-    if not objective_values or not ideal_point:
-        return float("inf")
-    m = len(objective_values)
-    total = 0.0
-    for j in range(m):
-        if ideal_point[j] != 0:
-            total += abs(objective_values[j] - ideal_point[j]) / abs(ideal_point[j])
-        else:
-            total += abs(objective_values[j])
-    return total / m
-
-
 def is_pareto_dominated(a: list[float], b: list[float]) -> bool:
     at_least_one_strictly_better = False
     for aj, bj in zip(a, b):
@@ -96,38 +137,3 @@ def extract_pareto_front(points: list[list[float]]) -> list[list[float]]:
         if not dominated:
             front.append(p)
     return front
-
-
-def compute_metrics_from_history(
-    objective_histories: list[list[float]],
-    reference_point: list[float] | None = None,
-    ideal_point: list[float] | None = None,
-) -> dict:
-    if not objective_histories:
-        return {"hypervolume": 0.0, "pareto_gap": float("inf"), "num_pareto_points": 0}
-
-    final_values = objective_histories[-1]
-    m = len(final_values)
-
-    if reference_point is None:
-        max_vals = [max(h[j] for h in objective_histories) for j in range(m)]
-        min_vals = [min(h[j] for h in objective_histories) for j in range(m)]
-        ranges = [max_vals[j] - min_vals[j] for j in range(m)]
-        reference_point = [max_vals[j] + 0.1 * max(ranges[j], abs(max_vals[j]) * 0.01, 0.01) for j in range(m)]
-
-    if ideal_point is None:
-        min_vals = [min(h[j] for h in objective_histories) for j in range(m)]
-        ideal_point = min_vals
-
-    all_points = objective_histories
-    pareto_front = extract_pareto_front(all_points)
-
-    hv = hypervolume(pareto_front, reference_point)
-    pg = pareto_gap(final_values, ideal_point)
-
-    return {
-        "hypervolume": hv,
-        "pareto_gap": pg,
-        "num_pareto_points": len(pareto_front),
-        "final_objectives": final_values,
-    }
