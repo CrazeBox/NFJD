@@ -4,8 +4,8 @@
 
 | File | Description |
 |------|-------------|
-| `NFJD_Architecture_Design.md` | NFJD架构设计文档（含ConflictAwareMomentum） |
-| `NFJD_Experiment_Plans/` | Phase 1-4实验计划与检查清单 |
+| `NFJD_Method.md` | NFJD完整方法文档（架构设计 + v2对齐分数更新 + FedJD对比） |
+| `NFJD_Experiment_Plans/` | Phase 1-5实验计划与检查清单 |
 
 ## Legacy FedJD Documentation
 

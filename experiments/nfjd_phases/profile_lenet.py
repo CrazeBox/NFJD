@@ -158,9 +158,9 @@ def profile_lenet():
     log(f"{'TOTAL':<30s} {total_time:<12.4f} 100.0%")
 
     per_step = total_time / n_batches if n_batches > 0 else 0
-    log(f"\n骞冲潎姣忔鏃堕棿: {per_step:.4f}绉?)
-    log(f"姣忚疆(10涓猙atch脳3epochs脳5瀹㈡埛绔?棰勪及鏃堕棿: {10 * 3 * 5 * per_step:.2f}绉?)
-    log(f"姣忚疆(10涓猙atch脳3epochs脳5瀹㈡埛绔覆琛?棰勪及鏃堕棿: {10 * 3 * 5 * per_step:.2f}绉?)
+    log(f"\nAvg per-step time: {per_step:.4f}s")
+    log(f"Per-round (10 batches x 3 epochs x 5 clients) parallel estimate: {10 * 3 * 5 * per_step:.2f}s")
+    log(f"Per-round (10 batches x 3 epochs x 5 clients) serial estimate: {10 * 3 * 5 * per_step:.2f}s")
 
     return times
 
