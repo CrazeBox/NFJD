@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import logging
 import os
 from typing import List, Tuple, Optional
@@ -19,44 +20,15 @@ class LocalCelebA(Dataset):
         self.split = split
         self.transform = transform
 
-        attr_path = os.path.join(root, "list_attr_celeba.txt")
-        partition_path = os.path.join(root, "list_eval_partition.txt")
-        img_dir = os.path.join(root, "img_align_celeba")
+        attr_path = self._find_file(root, ["list_attr_celeba.txt", "list_attr_celeba.csv"])
+        partition_path = self._find_file(root, ["list_eval_partition.txt", "list_eval_partition.csv"])
+        img_dir = self._find_img_dir(root)
 
-        if not os.path.isdir(img_dir):
-            img_dir = os.path.join(root, "celeba", "img_align_celeba")
-        if not os.path.isdir(img_dir):
-            raise FileNotFoundError(
-                f"Cannot find img_align_celeba/ under {root} or {root}/celeba"
-            )
-
-        with open(attr_path, "r") as f:
-            lines = f.readlines()
-        num_imgs = int(lines[0].strip())
-        attr_names = lines[1].strip().split()
-        self.attr_names = attr_names
-
-        attr_data = {}
-        for line in lines[2:]:
-            parts = line.strip().split()
-            if len(parts) < 2:
-                continue
-            filename = parts[0]
-            attrs = [(1 if int(x) == 1 else 0) for x in parts[1:]]
-            attr_data[filename] = attrs
+        self.attr_names, attr_data = self._load_attrs(attr_path)
+        partition = self._load_partition(partition_path)
 
         split_map = {"train": 0, "valid": 1, "test": 2}
         target_split = split_map.get(split, 0)
-
-        partition = {}
-        with open(partition_path, "r") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 2:
-                    continue
-                filename = parts[0]
-                s = int(parts[1])
-                partition[filename] = s
 
         self.filenames = []
         self.attr_list = []
@@ -72,6 +44,96 @@ class LocalCelebA(Dataset):
             "LocalCelebA: split=%s, %d images, %d attributes from %s",
             split, len(self.filenames), len(self.attr_names), root,
         )
+
+    @staticmethod
+    def _find_file(root: str, candidates: list[str]) -> str:
+        for name in candidates:
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                return path
+            path = os.path.join(root, "celeba", name)
+            if os.path.isfile(path):
+                return path
+        raise FileNotFoundError(
+            f"Cannot find any of {candidates} under {root} or {root}/celeba"
+        )
+
+    @staticmethod
+    def _find_img_dir(root: str) -> str:
+        for d in [
+            os.path.join(root, "img_align_celeba"),
+            os.path.join(root, "img_celeba"),
+            os.path.join(root, "celeba", "img_align_celeba"),
+            os.path.join(root, "celeba", "img_celeba"),
+        ]:
+            if os.path.isdir(d):
+                return d
+        raise FileNotFoundError(
+            f"Cannot find image directory under {root}"
+        )
+
+    @staticmethod
+    def _load_attrs(path: str) -> tuple[list[str], dict[str, list[int]]]:
+        is_csv = path.endswith(".csv")
+        attr_data = {}
+        attr_names = []
+
+        if is_csv:
+            with open(path, "r") as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                if header[0].strip().isdigit():
+                    attr_names = [h.strip() for h in header[1:]]
+                    num_imgs = int(header[0].strip())
+                else:
+                    attr_names = [h.strip() for h in header[1:]]
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    filename = row[0].strip()
+                    attrs = [(1 if int(x.strip()) == 1 else 0) for x in row[1:]]
+                    attr_data[filename] = attrs
+        else:
+            with open(path, "r") as f:
+                lines = f.readlines()
+            num_imgs = int(lines[0].strip())
+            attr_names = lines[1].strip().split()
+            for line in lines[2:]:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                filename = parts[0]
+                attrs = [(1 if int(x) == 1 else 0) for x in parts[1:]]
+                attr_data[filename] = attrs
+
+        return attr_names, attr_data
+
+    @staticmethod
+    def _load_partition(path: str) -> dict[str, int]:
+        is_csv = path.endswith(".csv")
+        partition = {}
+
+        if is_csv:
+            with open(path, "r") as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    filename = row[0].strip()
+                    s = int(row[1].strip())
+                    partition[filename] = s
+        else:
+            with open(path, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 2:
+                        continue
+                    filename = parts[0]
+                    s = int(parts[1])
+                    partition[filename] = s
+
+        return partition
 
     def __len__(self):
         return len(self.filenames)

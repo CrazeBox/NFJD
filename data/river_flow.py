@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import TensorDataset
 
 logger = logging.getLogger(__name__)
 
+RIVER_FLOW_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00444/river_flow.zip"
 RIVER_FLOW_DIR = Path("data/river_flow")
-RIVER_FLOW_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _download_river_flow(data_dir: Path):
+    import zipfile
+    import urllib.request
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = data_dir / "river_flow.zip"
+
+    if not zip_path.exists():
+        logger.info("Downloading River Flow dataset from UCI...")
+        urllib.request.urlretrieve(RIVER_FLOW_URL, str(zip_path))
+        logger.info("Download complete: %s", zip_path)
+
+    with zipfile.ZipFile(str(zip_path), "r") as zf:
+        zf.extractall(str(data_dir))
+    logger.info("Extracted to %s", data_dir)
 
 
 def make_river_flow(
@@ -17,19 +36,40 @@ def make_river_flow(
     iid: bool = True,
     seed: int = 7,
     num_tasks: int = 8,
+    download: bool = True,
 ) -> dict:
     torch.manual_seed(seed)
 
     data_path = RIVER_FLOW_DIR / "river_flow.csv"
     if not data_path.exists():
-        raise FileNotFoundError(
-            f"River Flow data not found at {data_path}. "
-            "Please download from UCI and place the CSV file there. "
-            "Expected format: rows=samples, columns=features+targets. "
-            "Last {num_tasks} columns are the 8 river flow targets."
-        )
+        alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
+        if alt_paths:
+            data_path = alt_paths[0]
+            logger.info("Using alternative CSV: %s", data_path)
+        elif download:
+            _download_river_flow(RIVER_FLOW_DIR)
+            alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
+            if alt_paths:
+                data_path = alt_paths[0]
+            else:
+                raise FileNotFoundError(
+                    f"River Flow CSV not found after download in {RIVER_FLOW_DIR}. "
+                    "Please manually download from UCI Machine Learning Repository "
+                    "(https://archive.ics.uci.edu/ml/datasets/River+Flow) and place "
+                    "the CSV file at data/river_flow/river_flow.csv. "
+                    "Expected format: rows=samples, columns=features+targets. "
+                    f"Last {num_tasks} columns are the 8 river flow targets."
+                )
+        else:
+            raise FileNotFoundError(
+                f"River Flow data not found at {data_path}. "
+                "Please download from UCI Machine Learning Repository "
+                "(https://archive.ics.uci.edu/ml/datasets/River+Flow) and place "
+                "the CSV file at data/river_flow/river_flow.csv. "
+                "Expected format: rows=samples, columns=features+targets. "
+                f"Last {num_tasks} columns are the {num_tasks} river flow targets."
+            )
 
-    import numpy as np
     raw = np.loadtxt(str(data_path), delimiter=",", skiprows=1)
     n_features = raw.shape[1] - num_tasks
 
