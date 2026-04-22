@@ -30,7 +30,7 @@ METHODS = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
 CELEBA_ROOT = "/root/data/celeba/celeba"
 
 
-def run_celeba(method, seed, iid=True, num_rounds=50,
+def run_celeba(method, seed, iid=True, num_rounds=200,
                num_clients=10, participation_rate=0.5, learning_rate=0.0001,
                num_tasks=4, fair_comparison=False):
     split_name = "iid" if iid else "noniid"

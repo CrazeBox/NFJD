@@ -28,25 +28,41 @@ def compute_f1_scores(predictions: torch.Tensor, targets: torch.Tensor, num_task
         for t in range(num_tasks):
             pred_labels = predictions[:, t].argmax(dim=-1)
             true_labels = targets[:, t].long()
-            tp = ((pred_labels == 1) & (true_labels == 1)).sum().float()
-            fp = ((pred_labels == 1) & (true_labels == 0)).sum().float()
-            fn = ((pred_labels == 0) & (true_labels == 1)).sum().float()
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            f1_scores.append(f1.item())
+            num_classes = predictions[:, t].shape[-1] if predictions[:, t].dim() > 1 else 2
+            if predictions[:, t].dim() > 1 and num_classes > 2:
+                f1 = _macro_f1(pred_labels, true_labels, num_classes)
+            else:
+                tp = ((pred_labels == 1) & (true_labels == 1)).sum().float()
+                fp = ((pred_labels == 1) & (true_labels == 0)).sum().float()
+                fn = ((pred_labels == 0) & (true_labels == 1)).sum().float()
+                prec = tp / (tp + fp) if (tp + fp) > 0 else torch.tensor(0.0)
+                rec = tp / (tp + fn) if (tp + fn) > 0 else torch.tensor(0.0)
+                f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else torch.tensor(0.0)
+            f1_scores.append(float(f1))
     return f1_scores
 
 
+def _macro_f1(pred_labels: torch.Tensor, true_labels: torch.Tensor, num_classes: int) -> float:
+    f1_per_class = []
+    for c in range(num_classes):
+        tp = ((pred_labels == c) & (true_labels == c)).sum().float()
+        fp = ((pred_labels == c) & (true_labels != c)).sum().float()
+        fn = ((pred_labels != c) & (true_labels == c)).sum().float()
+        prec = tp / (tp + fp) if (tp + fp) > 0 else torch.tensor(0.0)
+        rec = tp / (tp + fn) if (tp + fn) > 0 else torch.tensor(0.0)
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else torch.tensor(0.0)
+        f1_per_class.append(float(f1))
+    return sum(f1_per_class) / len(f1_per_class)
+
+
 def compute_accuracy(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    total = predictions.shape[0]
     correct = [0] * num_tasks
-    total = 0
     with torch.no_grad():
         for t in range(num_tasks):
             pred_labels = predictions[:, t].argmax(dim=-1)
             true_labels = targets[:, t].long()
             correct[t] += (pred_labels == true_labels).sum().item()
-        total += predictions.shape[0]
     return [c / max(total, 1) for c in correct]
 
 

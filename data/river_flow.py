@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +30,26 @@ def _download_river_flow(data_dir: Path):
     logger.info("Extracted to %s", data_dir)
 
 
+def _load_csv_robust(data_path: Path) -> np.ndarray:
+    try:
+        import pandas as pd
+        df = pd.read_csv(str(data_path))
+        df = df.apply(pd.to_numeric, errors="coerce")
+        df = df.dropna()
+        if len(df) == 0:
+            raise ValueError(f"No valid rows after cleaning {data_path}")
+        return df.values.astype(np.float64)
+    except ImportError:
+        pass
+
+    raw = np.genfromtxt(str(data_path), delimiter=",", skip_header=1)
+    mask = ~np.isnan(raw).any(axis=1)
+    raw = raw[mask]
+    if len(raw) == 0:
+        raise ValueError(f"No valid rows after cleaning {data_path}")
+    return raw
+
+
 def make_river_flow(
     num_clients: int = 10,
     iid: bool = True,
@@ -44,33 +63,50 @@ def make_river_flow(
     if not data_path.exists():
         alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
         if alt_paths:
-            data_path = alt_paths[0]
-            logger.info("Using alternative CSV: %s", data_path)
+            rf1_candidates = [p for p in alt_paths if "rf1" in p.name.lower()]
+            if rf1_candidates:
+                data_path = rf1_candidates[0]
+                logger.info("Using RF1 CSV: %s", data_path)
+            else:
+                data_path = alt_paths[0]
+                logger.info("Using alternative CSV: %s", data_path)
         elif download:
             _download_river_flow(RIVER_FLOW_DIR)
             alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
             if alt_paths:
-                data_path = alt_paths[0]
+                rf1_candidates = [p for p in alt_paths if "rf1" in p.name.lower()]
+                if rf1_candidates:
+                    data_path = rf1_candidates[0]
+                else:
+                    data_path = alt_paths[0]
             else:
                 raise FileNotFoundError(
                     f"River Flow CSV not found after download in {RIVER_FLOW_DIR}. "
-                    "Please manually download from UCI Machine Learning Repository "
-                    "(https://archive.ics.uci.edu/ml/datasets/River+Flow) and place "
-                    "the CSV file at data/river_flow/river_flow.csv. "
+                    "Please manually download RF1 from "
+                    "https://www.kaggle.com/datasets/samanemami/river-flowrf1 "
+                    "and place the CSV file at data/river_flow/RF1.csv. "
                     "Expected format: rows=samples, columns=features+targets. "
-                    f"Last {num_tasks} columns are the 8 river flow targets."
+                    f"Last {num_tasks} columns are the {num_tasks} river flow targets."
                 )
         else:
             raise FileNotFoundError(
                 f"River Flow data not found at {data_path}. "
-                "Please download from UCI Machine Learning Repository "
-                "(https://archive.ics.uci.edu/ml/datasets/River+Flow) and place "
-                "the CSV file at data/river_flow/river_flow.csv. "
+                "Please download RF1 from "
+                "https://www.kaggle.com/datasets/samanemami/river-flowrf1 "
+                "and place the CSV file at data/river_flow/RF1.csv. "
                 "Expected format: rows=samples, columns=features+targets. "
                 f"Last {num_tasks} columns are the {num_tasks} river flow targets."
             )
 
-    raw = np.loadtxt(str(data_path), delimiter=",", skiprows=1)
+    raw = _load_csv_robust(data_path)
+
+    if raw.shape[1] < num_tasks + 1:
+        raise ValueError(
+            f"CSV has {raw.shape[1]} columns but need at least {num_tasks + 1} "
+            f"({num_tasks} targets + at least 1 feature). "
+            f"File: {data_path}"
+        )
+
     n_features = raw.shape[1] - num_tasks
 
     X = raw[:, :n_features]

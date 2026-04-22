@@ -61,8 +61,10 @@ class LocalCelebA(Dataset):
     @staticmethod
     def _find_img_dir(root: str) -> str:
         for d in [
+            os.path.join(root, "img_align_celeba", "img_align_celeba"),
             os.path.join(root, "img_align_celeba"),
             os.path.join(root, "img_celeba"),
+            os.path.join(root, "celeba", "img_align_celeba", "img_align_celeba"),
             os.path.join(root, "celeba", "img_align_celeba"),
             os.path.join(root, "celeba", "img_celeba"),
         ]:

@@ -28,7 +28,7 @@ SEEDS = [7, 42, 123]
 METHODS = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
 
 
-def run_multimnist(method, seed, iid=True, num_rounds=50,
+def run_multimnist(method, seed, iid=True, num_rounds=200,
                    num_clients=10, participation_rate=0.5, learning_rate=0.001,
                    fair_comparison=False):
     split_name = "iid" if iid else "noniid"

@@ -175,7 +175,7 @@ def main() -> None:
                         )
                         results.append(result)
                         log(
-                            f"  RI={result['avg_ri']:.4f} JFI={result['hv']:.4f} "
+                            f"  RI={result['avg_ri']:.4f} JFI={result['task_jfi']:.4f} "
                             f"time={result['elapsed']:.1f}s round={result['avg_rt']:.3f}s decr={result['all_decr']}"
                         )
                     except Exception as exc:
@@ -193,7 +193,7 @@ def main() -> None:
         if not rows:
             continue
         avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-        avg_jfi = sum(r["hv"] for r in rows) / len(rows)
+        avg_jfi = sum(r["task_jfi"] for r in rows) / len(rows)
         avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
         avg_elapsed = sum(r["elapsed"] for r in rows) / len(rows)
         decr_pct = sum(1 for r in rows if r["all_decr"]) / len(rows)
@@ -218,7 +218,7 @@ def main() -> None:
                 if not rows:
                     continue
                 avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-                avg_jfi = sum(r["hv"] for r in rows) / len(rows)
+                avg_jfi = sum(r["task_jfi"] for r in rows) / len(rows)
                 avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
                 if recompute_interval == args.recompute_intervals[0]:
                     base_rt = avg_rt
