@@ -29,7 +29,7 @@ SEEDS = [7, 42, 123]
 METHODS = ["nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg"]
 
 
-def run_riverflow(method, seed, iid=True, num_rounds=200,
+def run_riverflow(method, seed, iid=True, num_rounds=50,
                   num_clients=10, participation_rate=0.5, learning_rate=0.001,
                   num_tasks=8, fair_comparison=False):
     split_name = "iid" if iid else "noniid"
