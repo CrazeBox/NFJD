@@ -15,6 +15,7 @@ from fedjd.aggregators import MinNormAggregator
 from fedjd.compressors import Float16Compressor, NoCompressor
 from fedjd.core import (
     DirectionAvgServer,
+    FMGDAClient,
     FedJDClient,
     FedJDServer,
     FedJDTrainer,
@@ -112,6 +113,10 @@ def _run_single(
         FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device)
         for i in range(num_clients)
     ]
+    fmgda_clients = [
+        FMGDAClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, learning_rate=learning_rate)
+        for i in range(num_clients)
+    ]
 
     objective_fn = multi_objective_regression
     compressor = Float16Compressor() if use_float16 else NoCompressor()
@@ -125,8 +130,9 @@ def _run_single(
         )
     elif method == "fmgda":
         server = FMGDAServer(
-            model=model, clients=clients, objective_fn=objective_fn,
+            model=model, clients=fmgda_clients, objective_fn=objective_fn,
             participation_rate=participation_rate, learning_rate=learning_rate, device=device,
+            num_objectives=m,
         )
     elif method == "weighted_sum":
         server = WeightedSumServer(

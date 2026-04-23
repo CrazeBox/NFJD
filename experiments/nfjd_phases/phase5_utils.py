@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from fedjd.core import (
-    FedJDClient, FMGDAServer,
+    FMGDAClient, FMGDAServer,
     NFJDClient, NFJDServer, NFJDTrainer,
     PHASE5_FORMAL_BASELINES, Phase5OfficialBaselineClient,
     Phase5OfficialBaselineServer, FedJDTrainer, get_phase5_method_spec,
@@ -63,12 +63,12 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
 
     if method == "fmgda":
         clients = [
-            FedJDClient(
+            FMGDAClient(
                 client_id=i,
                 dataset=client_datasets[i],
                 batch_size=256,
                 device=device,
-                use_full_loader=True,
+                learning_rate=learning_rate,
                 local_epochs=local_epochs,
             )
             for i in range(num_clients)
@@ -81,6 +81,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             learning_rate=learning_rate,
             device=device,
             eval_dataset=eval_dataset,
+            num_objectives=m,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 

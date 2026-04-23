@@ -54,7 +54,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         paper_title="Federated Multi-Objective Learning (Yang et al., NeurIPS 2023)",
         paper_url="https://arxiv.org/abs/2310.09866",
         official_repo="",
-        implementation_note="Server-side FMGDA over aggregated client Jacobians, following the federated multi-objective learning formulation instead of a local FedAvg+MGDA wrapper.",
+        implementation_note="Paper-aligned FMGDA with one local trajectory per objective on each client, objective-wise gradient aggregation on the server, and a server-side MGDA min-norm solve.",
     ),
     "fedavg_pcgrad": Phase5MethodSpec(
         method="fedavg_pcgrad",

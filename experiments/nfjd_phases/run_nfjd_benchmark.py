@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from fedjd.aggregators import MinNormAggregator
 from fedjd.core import (
-    DirectionAvgServer, FedJDClient, FedJDServer, FedJDTrainer,
+    DirectionAvgServer, FMGDAClient, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
 from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
@@ -79,8 +79,8 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fmgda":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
-        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
+        clients = [FMGDAClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, learning_rate=learning_rate, local_epochs=local_epochs) for i in range(num_clients)]
+        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset, num_objectives=m)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "weighted_sum":
         clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
@@ -117,7 +117,7 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         "num_rounds": num_rounds, "num_clients": num_clients,
         "participation_rate": participation_rate, "learning_rate": learning_rate,
         "conflict_strength": conflict_strength,
-        "model_size": model_size, "local_epochs": local_epochs if method == "nfjd" else 1,
+        "model_size": model_size, "local_epochs": local_epochs if method in ("nfjd", "fmgda") else 1,
         "use_adaptive_rescaling": use_adaptive_rescaling if method == "nfjd" else False,
         "use_stochastic_gramian": use_stochastic_gramian if method == "nfjd" else False,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import copy
 import random
 import time
+from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from fedjd.aggregators import MinNormAggregator
 
-from .client import FedJDClient, ObjectiveFn, _measure_peak_memory
+from .client import FedJDClient, ObjectiveFn, _measure_peak_memory, flatten_gradients
 from .evaluation import evaluate_objectives_on_dataset
 from .server import RoundStats, _count_nan_inf, assign_flat_parameters, flatten_parameters
 
@@ -49,11 +51,117 @@ def _evaluate_global_objectives(model, clients, objective_fn, device):
     return [float(value.item()) for value in running]
 
 
+@dataclass
+class FMGDAClientResult:
+    client_id: int
+    objective_updates: torch.Tensor
+    objective_mask: torch.Tensor
+    num_examples: int
+    compute_time: float = 0.0
+    upload_bytes: int = 0
+    peak_memory_mb: float = 0.0
+
+
+class FMGDAClient:
+    """Paper-aligned FMGDA client with one local trajectory per objective."""
+
+    def __init__(
+        self,
+        client_id: int,
+        dataset: Dataset,
+        batch_size: int,
+        device: torch.device,
+        learning_rate: float,
+        local_epochs: int = 1,
+        objective_indices: list[int] | None = None,
+    ) -> None:
+        self.client_id = client_id
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.device = device
+        self.learning_rate = learning_rate
+        self.local_epochs = local_epochs
+        self.objective_indices = objective_indices
+
+    @property
+    def num_examples(self) -> int:
+        return len(self.dataset)
+
+    def compute_objective_updates(
+        self,
+        model: nn.Module,
+        objective_fn: ObjectiveFn,
+        num_objectives: int,
+    ) -> FMGDAClientResult:
+        start = time.time()
+        active_objectives = self.objective_indices or list(range(num_objectives))
+        if not active_objectives:
+            raise ValueError("FMGDAClient requires at least one active objective.")
+
+        local_models = {
+            objective_idx: copy.deepcopy(model).to(self.device)
+            for objective_idx in active_objectives
+        }
+        objective_updates = None
+        weights = torch.zeros(num_objectives, dtype=torch.float32, device=self.device)
+
+        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+        for _ in range(self.local_epochs):
+            for batch_inputs, batch_targets in loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+                batch_weight = float(batch_inputs.shape[0])
+
+                for objective_idx in active_objectives:
+                    local_model = local_models[objective_idx]
+                    local_model.zero_grad(set_to_none=True)
+                    predictions = local_model(batch_inputs)
+                    losses = objective_fn(predictions, batch_targets, batch_inputs)
+                    losses[objective_idx].backward()
+                    gradient = flatten_gradients(local_model.parameters())
+
+                    if objective_updates is None:
+                        objective_updates = torch.zeros(
+                            num_objectives,
+                            gradient.numel(),
+                            dtype=gradient.dtype,
+                            device=self.device,
+                        )
+
+                    objective_updates[objective_idx].add_(gradient, alpha=batch_weight)
+                    weights[objective_idx] += batch_weight
+
+                    next_flat = flatten_parameters(local_model.parameters()) - self.learning_rate * gradient
+                    assign_flat_parameters(local_model.parameters(), next_flat)
+
+        if objective_updates is None:
+            raise RuntimeError("No batch available to compute FMGDA objective updates.")
+
+        objective_mask = weights > 0
+        for objective_idx in active_objectives:
+            if weights[objective_idx] > 0:
+                objective_updates[objective_idx] /= weights[objective_idx]
+
+        uploaded = objective_updates[objective_mask]
+        upload_bytes = uploaded.numel() * uploaded.element_size()
+
+        return FMGDAClientResult(
+            client_id=self.client_id,
+            objective_updates=objective_updates.detach().clone(),
+            objective_mask=objective_mask.detach().clone(),
+            num_examples=self.num_examples,
+            compute_time=time.time() - start,
+            upload_bytes=upload_bytes,
+            peak_memory_mb=_measure_peak_memory(),
+        )
+
+
 class FMGDAServer:
-    """FMGDA: aggregates client Jacobians on the server and applies a min-norm MGDA direction."""
+    """Paper-aligned FMGDA with client-side local trajectories per objective."""
 
     def __init__(self, model, clients, objective_fn, participation_rate,
-                 learning_rate, device, weights=None, aggregator=None, eval_dataset=None):
+                 learning_rate, device, weights=None, aggregator=None,
+                 eval_dataset=None, num_objectives=None):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -63,6 +171,7 @@ class FMGDAServer:
         self.weights = weights
         self.aggregator = aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         self.eval_dataset = eval_dataset
+        self.num_objectives = num_objectives
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -74,13 +183,15 @@ class FMGDAServer:
         return random.sample(self.clients, sample_size)
 
     def _clone_model(self):
-        import copy
         return copy.deepcopy(self.model).to(self.device)
 
     def run_round(self, round_idx):
         round_start = time.time()
         sampled = self.sample_clients()
-        total_examples = sum(c.num_examples for c in sampled)
+        num_objectives = self.num_objectives
+        if num_objectives is None:
+            num_objectives = len(self.evaluate_global_objectives())
+            self.num_objectives = num_objectives
 
         client_start = time.time()
         sampled_ids = []
@@ -88,14 +199,31 @@ class FMGDAServer:
         total_nan_inf = 0
         max_client_mem = 0.0
         per_client_upload = 0
-        all_jacobians = []
+        aggregated_updates = None
+        aggregated_counts = None
+        local_steps = 1
 
         for client in sampled:
-            result = client.compute_jacobian(self._clone_model(), self.objective_fn)
-            all_jacobians.append(result.jacobian)
+            result = client.compute_objective_updates(
+                self._clone_model(),
+                self.objective_fn,
+                num_objectives=num_objectives,
+            )
+            if aggregated_updates is None:
+                aggregated_updates = torch.zeros_like(result.objective_updates)
+                aggregated_counts = torch.zeros(
+                    result.objective_updates.shape[0],
+                    dtype=result.objective_updates.dtype,
+                    device=self.device,
+                )
+                local_steps = getattr(client, "local_epochs", 1)
+            mask_indices = torch.nonzero(result.objective_mask.to(self.device), as_tuple=False).flatten()
+            if mask_indices.numel() > 0:
+                aggregated_updates[mask_indices] += result.objective_updates[mask_indices].to(self.device)
+                aggregated_counts[mask_indices] += 1.0
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
-            total_nan_inf += _count_nan_inf(result.jacobian)
+            total_nan_inf += _count_nan_inf(result.objective_updates)
             if result.peak_memory_mb > max_client_mem:
                 max_client_mem = result.peak_memory_mb
             if per_client_upload == 0:
@@ -105,12 +233,15 @@ class FMGDAServer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        dir_start = time.time()
-        aggregated = torch.zeros_like(all_jacobians[0])
-        for jac, client in zip(all_jacobians, sampled):
-            w = client.num_examples / total_examples
-            aggregated.add_(jac * w)
+        if aggregated_updates is None or aggregated_counts is None:
+            raise RuntimeError("No client contributed FMGDA objective updates.")
 
+        active_mask = aggregated_counts > 0
+        if not active_mask.any():
+            raise RuntimeError("No objectives available after FMGDA client aggregation.")
+
+        dir_start = time.time()
+        aggregated = aggregated_updates[active_mask] / aggregated_counts[active_mask].unsqueeze(1)
         if self.aggregator is not None:
             direction = self.aggregator(aggregated)
         else:
@@ -150,6 +281,7 @@ class FMGDAServer:
             jacobian_upload_per_client=per_client_upload,
             gradient_upload_per_client=grad_upload,
             jacobian_vs_gradient_ratio=per_client_upload / max(grad_upload, 1),
+            local_steps=local_steps,
             method_name="fmgda",
         )
 

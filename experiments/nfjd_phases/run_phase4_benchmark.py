@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from fedjd.aggregators import MinNormAggregator
 from fedjd.core import (
-    DirectionAvgServer, FedJDClient, FedJDServer, FedJDTrainer,
+    DirectionAvgServer, FMGDAClient, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
 from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
@@ -74,8 +74,8 @@ def _run_common(exp_id, method, model, client_datasets, objective_fn, m, seed,
         server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=eval_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fmgda":
-        clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=le) for i in range(num_clients)]
-        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=eval_dataset)
+        clients = [FMGDAClient(client_id=i, dataset=client_datasets[i], batch_size=32, device=device, learning_rate=learning_rate, local_epochs=le) for i in range(num_clients)]
+        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=eval_dataset, num_objectives=m)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "weighted_sum":
         clients = [FedJDClient(client_id=i, dataset=client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=le) for i in range(num_clients)]

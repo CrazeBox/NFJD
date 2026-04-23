@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from fedjd.aggregators import MinNormAggregator
 from fedjd.compressors import Float16Compressor, NoCompressor
-from fedjd.core.baselines import DirectionAvgServer, FMGDAServer, WeightedSumServer
+from fedjd.core.baselines import DirectionAvgServer, FMGDAClient, FMGDAServer, WeightedSumServer
 from fedjd.core.client import FedJDClient
 from fedjd.core.server import FedJDServer
 from fedjd.core.trainer import FedJDTrainer
@@ -100,6 +100,10 @@ def _run_single(
         FedJDClient(client_id=i, dataset=ds, batch_size=32, device=device)
         for i, ds in enumerate(data.client_datasets)
     ]
+    fmgda_clients = [
+        FMGDAClient(client_id=i, dataset=ds, batch_size=32, device=device, learning_rate=learning_rate)
+        for i, ds in enumerate(data.client_datasets)
+    ]
 
     compressor = Float16Compressor() if use_float16 else NoCompressor()
     aggregator = MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
@@ -112,9 +116,9 @@ def _run_single(
         )
     elif method == "fmgda":
         server = FMGDAServer(
-            model=model, clients=clients, objective_fn=objective_fn,
+            model=model, clients=fmgda_clients, objective_fn=objective_fn,
             participation_rate=participation_rate, learning_rate=learning_rate,
-            device=device,
+            device=device, num_objectives=m,
         )
     elif method == "weighted_sum":
         server = WeightedSumServer(
