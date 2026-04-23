@@ -9,12 +9,19 @@ This document records the current canonical state of NFJD, the major changes tha
 As of the current codebase state, the intended mainline definition of NFJD is:
 
 - Local multi-objective core: `UPGrad`-based Jacobian descent on each client
-- Local approximation strategy: `recompute_interval` + reuse of the latest UPGrad-derived weight vector between recomputation steps
-- High-objective approximation: `StochasticGramianSolver` using sampled sub-Jacobians
-- Local stabilization: `AdaptiveRescaling` + local momentum
-- Server communication: upload `delta_theta` and lightweight `align_scores`
-- Server aggregation: alignment-aware weighted average + global momentum
+- Local solver mode: exact UPGrad recomputation on every local batch
+- Objective scaling: per-objective gradient normalization before the UPGrad solve
+- Server communication: upload `delta_theta` only in the mainline path
+- Server aggregation: plain sample-weighted FedAvg on uploaded `delta_theta`
 - Held-out tracking: validation set for round-by-round objective tracking, test set for final task metrics
+
+The following mechanisms remain implemented, but are no longer part of the current canonical path unless explicitly enabled for ablation:
+
+- `AdaptiveRescaling`
+- local/global momentum
+- alignment-aware weighting via `align_scores`
+- `recompute_interval` + weight reuse
+- `StochasticGramianSolver`
 
 Main code paths:
 
@@ -34,6 +41,8 @@ The following changes are already reflected in the code and should be treated as
 - Used the paper-aligned Gramian-space dual formulation instead of direct parameter-space projection
 - Updated `StochasticGramianSolver` to support `upgrad` mode
 - Switched stale local reuse from simplex-style `lambda` semantics to UPGrad-derived weight reuse
+- Added exact-UPGrad and objective-normalization switches so the mainline can run without reuse, momentum, adaptive rescaling, or stochastic sampling
+- Upgraded the exact-UPGrad mainline to prefer a high-precision active-set box-QP solve for small `m`, with PGD retained only as a fallback path
 
 ### Evaluation and Fairness
 
@@ -85,25 +94,15 @@ These are the most important unresolved method questions.
 
 ### 1. Exact vs Approximate UPGrad
 
-Current NFJD uses approximate local Jacobian descent:
+The mainline now uses exact local UPGrad. The open question has flipped: we should only re-introduce reuse / approximate variants if they recover speed without harming the new backbone.
 
-- exact on recomputation steps
-- stale-weight approximation on intermediate steps
+### 2. Objective Normalization Design
 
-This is the practical version. A small-scale exact reference variant is still worth implementing for comparison.
+The current mainline uses EMA gradient-norm normalization. It is still worth comparing this against loss-based normalization or no normalization on selected tasks.
 
-### 2. Server Aggregation Rule
+### 3. Optional Server Heuristics
 
-Current mainline server update is:
-
-- alignment-aware weighted average
-- followed by global momentum
-
-This is empirically reasonable for noisy federated `delta_theta` updates, but it is still heuristic. A cleaner comparison against pure weighted averaging remains useful.
-
-### 3. Alignment Heuristic Strength
-
-The current server-side alignment adjustment is intentionally simple. It is useful in practice but should still be regarded as heuristic unless stronger empirical or theoretical support is added.
+Alignment-aware weighting and global momentum remain available but are now explicitly optional. They should only come back into the mainline if they beat plain FedAvg on top of the exact local UPGrad backbone.
 
 ### 4. Full Gramian Reverse Accumulation
 
@@ -113,12 +112,11 @@ The JD paper outlines a deeper Gramian-based implementation path that avoids exp
 
 These are the highest-value next steps, ordered by importance.
 
-1. Add `NFJD-exact-UPGrad` on small tasks
-2. Compare `NFJD-exact-UPGrad` vs current approximate NFJD on toy and small synthetic settings
-3. Run a clean server ablation: pure weighted average vs alignment-aware average vs alignment-aware average + global momentum
-4. Add sensitivity analysis for alignment adjustment strength
-5. Add stronger statistical reporting for Phase 5 summaries
-6. Decide whether to keep or archive older benchmark scripts that still assume pre-UPGrad NFJD semantics
+1. Run the new exact-UPGrad + objective-normalization backbone on Phase 5 and inspect whether it closes the gap to `PCGrad/CAGrad`
+2. Compare exact vs approximate local UPGrad only after the new backbone has clean results
+3. Re-introduce optional modules one by one: adaptive rescaling, local momentum, global momentum, alignment-aware weighting, stochastic Gramian
+4. Add stronger statistical reporting for Phase 5 summaries
+5. Decide whether to keep or archive older benchmark scripts that still assume the pre-backbone NFJD semantics
 
 ## Phase 5 Post-Run Follow-Ups
 
@@ -146,6 +144,7 @@ For future iteration, use explicit labels in experiment notes and result summari
 Suggested tags:
 
 - `nfjd-upgrad-mainline`
+- `nfjd-upgrad-exact-fgavg`
 - `nfjd-upgrad-exact-ref`
 - `nfjd-server-no-momentum`
 - `nfjd-server-no-align`

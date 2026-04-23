@@ -65,12 +65,14 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
     if method == "nfjd":
         clients = [NFJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32,
                               device=device, local_epochs=local_epochs, learning_rate=learning_rate,
-                              local_momentum_beta=0.9, use_adaptive_rescaling=use_adaptive_rescaling,
-                              use_stochastic_gramian=use_stochastic_gramian, stochastic_subset_size=4,
-                              stochastic_seed=seed + i) for i in range(num_clients)]
+                              local_momentum_beta=0.0, use_adaptive_rescaling=False,
+                              use_stochastic_gramian=False, stochastic_subset_size=4,
+                              stochastic_seed=seed + i, recompute_interval=1,
+                              exact_upgrad=True, use_objective_normalization=True,
+                              upload_align_scores=False) for i in range(num_clients)]
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
-                            device=device, global_momentum_beta=0.9,
+                            device=device, global_momentum_beta=0.0,
                             parallel_clients=False, eval_dataset=fed_data.val_dataset)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
@@ -118,8 +120,8 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         "participation_rate": participation_rate, "learning_rate": learning_rate,
         "conflict_strength": conflict_strength,
         "model_size": model_size, "local_epochs": local_epochs if method in ("nfjd", "fmgda") else 1,
-        "use_adaptive_rescaling": use_adaptive_rescaling if method == "nfjd" else False,
-        "use_stochastic_gramian": use_stochastic_gramian if method == "nfjd" else False,
+        "use_adaptive_rescaling": False,
+        "use_stochastic_gramian": False,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
         "hypervolume": round(float(objective_summary["hypervolume"]), 6),
         "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),

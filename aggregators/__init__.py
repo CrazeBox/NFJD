@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from itertools import combinations
 
 import torch
 
@@ -98,11 +99,91 @@ class MinNormAggregator(JacobianAggregator):
 class UPGradAggregator(JacobianAggregator):
     """UPGrad via the paper's Gramian-space dual formulation."""
 
-    def __init__(self, max_iters: int = 250, lr: float = 0.1, tol: float = 1e-6, max_direction_norm: float = 0.0) -> None:
+    def __init__(
+        self,
+        max_iters: int = 250,
+        lr: float = 0.1,
+        tol: float = 1e-6,
+        max_direction_norm: float = 0.0,
+        solver: str = "auto",
+    ) -> None:
         self.max_iters = max_iters
         self.lr = lr
         self.tol = tol
         self.max_direction_norm = max_direction_norm
+        self.solver = solver
+
+    def _solve_box_qp_active_set(self, gramian: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor | None:
+        num_objectives = gramian.shape[0]
+        if num_objectives > 10:
+            return None
+
+        all_indices = list(range(num_objectives))
+        best_solution = None
+        best_value = None
+        tol = max(self.tol, 1e-8)
+
+        for free_size in range(num_objectives + 1):
+            for free_indices_tuple in combinations(all_indices, free_size):
+                free_indices = list(free_indices_tuple)
+                bound_indices = [idx for idx in all_indices if idx not in free_indices]
+                candidate = lower_bound.clone()
+
+                if free_indices:
+                    free_tensor = torch.tensor(free_indices, device=gramian.device, dtype=torch.long)
+                    bound_tensor = torch.tensor(bound_indices, device=gramian.device, dtype=torch.long)
+                    g_ff = gramian.index_select(0, free_tensor).index_select(1, free_tensor)
+                    rhs = torch.zeros(len(free_indices), dtype=gramian.dtype, device=gramian.device)
+                    if bound_indices:
+                        rhs = -gramian.index_select(0, free_tensor).index_select(1, bound_tensor) @ lower_bound.index_select(0, bound_tensor)
+                    solution = torch.linalg.pinv(g_ff, hermitian=True) @ rhs
+                    candidate.index_copy_(0, free_tensor, solution)
+
+                if torch.any(candidate < lower_bound - tol):
+                    continue
+
+                gradient = gramian @ candidate
+                if free_indices:
+                    free_tensor = torch.tensor(free_indices, device=gramian.device, dtype=torch.long)
+                    if torch.max(torch.abs(gradient.index_select(0, free_tensor))).item() > 5 * tol:
+                        continue
+                if bound_indices:
+                    bound_tensor = torch.tensor(bound_indices, device=gramian.device, dtype=torch.long)
+                    if torch.min(gradient.index_select(0, bound_tensor)).item() < -5 * tol:
+                        continue
+
+                value = float(candidate @ gradient)
+                if best_value is None or value < best_value:
+                    best_value = value
+                    best_solution = candidate
+
+        return best_solution
+
+    def _solve_box_qp_pgd(self, gramian: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
+        current = lower_bound.clone()
+        spectral_norm = torch.linalg.matrix_norm(gramian, ord=2)
+        safe_step = 1.0 / (2.0 * spectral_norm + 1e-8)
+        step_size = min(self.lr, float(safe_step.item())) if torch.isfinite(safe_step) else self.lr
+
+        with torch.no_grad():
+            for _ in range(self.max_iters):
+                gradient = 2.0 * (gramian @ current)
+                candidate = _project_lower_bound(current - step_size * gradient, lower_bound)
+                if torch.norm(candidate - current, p=2) <= self.tol:
+                    current = candidate
+                    break
+                current = candidate
+        return current
+
+    def _solve_box_qp(self, gramian: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
+        use_active_set = self.solver in ("auto", "active_set")
+        if use_active_set:
+            active_set_solution = self._solve_box_qp_active_set(gramian, lower_bound)
+            if active_set_solution is not None:
+                return active_set_solution
+            if self.solver == "active_set":
+                raise RuntimeError("Active-set UPGrad solve failed.")
+        return self._solve_box_qp_pgd(gramian, lower_bound)
 
     def __call__(self, jacobian: torch.Tensor) -> torch.Tensor:
         direction, _ = self.solve(jacobian)
@@ -120,23 +201,11 @@ class UPGradAggregator(JacobianAggregator):
             gramian = jacobian @ jacobian.T
             gramian = 0.5 * (gramian + gramian.T)
             lower_bounds = torch.eye(num_objectives, dtype=jacobian.dtype, device=jacobian.device)
-            spectral_norm = torch.linalg.matrix_norm(gramian, ord=2)
-            safe_step = 1.0 / (2.0 * spectral_norm + 1e-8)
-            step_size = min(self.lr, float(safe_step.item())) if torch.isfinite(safe_step) else self.lr
 
             solutions = []
-            with torch.no_grad():
-                for objective_idx in range(num_objectives):
-                    lower_bound = lower_bounds[objective_idx]
-                    current = lower_bound.clone()
-                    for _ in range(self.max_iters):
-                        gradient = 2.0 * (gramian @ current)
-                        candidate = _project_lower_bound(current - step_size * gradient, lower_bound)
-                        if torch.norm(candidate - current, p=2) <= self.tol:
-                            current = candidate
-                            break
-                        current = candidate
-                    solutions.append(current)
+            for objective_idx in range(num_objectives):
+                lower_bound = lower_bounds[objective_idx]
+                solutions.append(self._solve_box_qp(gramian, lower_bound))
 
             weights = torch.stack(solutions, dim=0).mean(dim=0)
             direction = jacobian.T @ weights

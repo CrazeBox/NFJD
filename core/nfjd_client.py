@@ -80,6 +80,11 @@ class NFJDClient:
         momentum_min_beta: float = 0.1,
         recompute_interval: int = 4,
         use_mixed_precision: bool = True,
+        exact_upgrad: bool = False,
+        use_objective_normalization: bool = False,
+        objective_norm_momentum: float = 0.9,
+        objective_norm_epsilon: float = 1e-8,
+        upload_align_scores: bool = True,
     ) -> None:
         self.client_id = client_id
         self.dataset = dataset
@@ -90,10 +95,16 @@ class NFJDClient:
         self.minnorm_max_iters = minnorm_max_iters
         self.minnorm_lr = minnorm_lr
         self.recompute_interval = max(recompute_interval, 1)
+        self.exact_upgrad = exact_upgrad
 
         self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
+        self.use_objective_normalization = use_objective_normalization
+        self.objective_norm_momentum = objective_norm_momentum
+        self.objective_norm_epsilon = objective_norm_epsilon
+        self.upload_align_scores = upload_align_scores
 
         self.prev_lambda: torch.Tensor | None = None
+        self._objective_norm_ema: torch.Tensor | None = None
         self.local_momentum = LocalMomentum(
             beta=local_momentum_beta,
             conflict_aware=conflict_aware_momentum,
@@ -108,6 +119,20 @@ class NFJDClient:
             mode="upgrad",
         ) if use_stochastic_gramian else None
         self.conflict_aware_momentum = conflict_aware_momentum
+
+    def _normalize_jacobian(self, jacobian: torch.Tensor) -> torch.Tensor:
+        if not self.use_objective_normalization:
+            return jacobian
+
+        row_norms = torch.norm(jacobian, p=2, dim=1).detach()
+        if self._objective_norm_ema is None or self._objective_norm_ema.shape != row_norms.shape:
+            self._objective_norm_ema = row_norms
+        else:
+            momentum = self.objective_norm_momentum
+            self._objective_norm_ema = momentum * self._objective_norm_ema + (1.0 - momentum) * row_norms
+
+        denom = self._objective_norm_ema.clamp(min=self.objective_norm_epsilon).to(jacobian.device, jacobian.dtype).unsqueeze(1)
+        return jacobian / denom
 
     @property
     def num_examples(self) -> int:
@@ -125,6 +150,9 @@ class NFJDClient:
 
     def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> ClientResult:
         start = time.time()
+        self.prev_lambda = None
+        self._objective_norm_ema = None
+        self.local_momentum.reset()
         theta_init = flatten_parameters(model.parameters()).clone()
         m = None
         final_lambda = None
@@ -137,6 +165,7 @@ class NFJDClient:
         rescale_history: list[float] = []
         cosine_history: list[float] = []
         last_avg_cosine_sim = 0.0
+        last_raw_jacobian = None
 
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -151,11 +180,17 @@ class NFJDClient:
                 if m is None:
                     m = len(losses)
                     dynamic_iters = self._compute_dynamic_iters(m)
-                    aggregator = UPGradAggregator(max_iters=dynamic_iters, lr=self.minnorm_lr)
+                    exact_solver = self.exact_upgrad and m <= 8
+                    aggregator = UPGradAggregator(
+                        max_iters=max(dynamic_iters, 500) if exact_solver else dynamic_iters,
+                        lr=self.minnorm_lr,
+                        tol=1e-9 if exact_solver else 1e-6,
+                        solver="auto",
+                    )
                     if self.stochastic_solver is not None:
                         self.stochastic_solver.max_iters = dynamic_iters
 
-                need_recompute = (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
+                need_recompute = self.exact_upgrad or (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
 
                 if need_recompute:
                     if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
@@ -174,6 +209,8 @@ class NFJDClient:
 
                     jacobian = torch.stack(independent_grads, dim=0)
                     model.zero_grad(set_to_none=True)
+                    last_raw_jacobian = jacobian.detach().clone()
+                    jacobian = self._normalize_jacobian(jacobian)
 
                     if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                         direction, sampled_indices = self.stochastic_solver.solve_sampled(
@@ -225,6 +262,8 @@ class NFJDClient:
 
                         jacobian = torch.stack(independent_grads, dim=0)
                         model.zero_grad(set_to_none=True)
+                        last_raw_jacobian = jacobian.detach().clone()
+                        jacobian = self._normalize_jacobian(jacobian)
 
                         if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                             direction, sampled_indices = self.stochastic_solver.solve_sampled(
@@ -258,9 +297,9 @@ class NFJDClient:
         compute_time = time.time() - start
 
         align_scores = None
-        if 'jacobian' in locals() and jacobian is not None:
+        if self.upload_align_scores and last_raw_jacobian is not None:
             # Positive alignment means the local update is predicted to reduce the objective.
-            align_scores = -(jacobian @ delta_theta)
+            align_scores = -(last_raw_jacobian @ delta_theta)
 
         avg_rescale_factor = sum(rescale_history) / len(rescale_history) if rescale_history else last_rescale_factor
         avg_cosine_sim = sum(cosine_history) / len(cosine_history) if cosine_history else last_avg_cosine_sim
@@ -275,7 +314,7 @@ class NFJDClient:
             rescale_factor=avg_rescale_factor,
             sampled_indices=sampled_indices,
             avg_cosine_sim=avg_cosine_sim,
-            jacobian=jacobian.detach().clone() if 'jacobian' in locals() else None,
+            jacobian=last_raw_jacobian.detach().clone() if last_raw_jacobian is not None else None,
             align_scores=align_scores.detach().clone() if align_scores is not None else None,
         )
 

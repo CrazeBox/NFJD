@@ -226,6 +226,7 @@ Phase 5 当前默认使用的 NFJD 主线版本为：
 4. 在最终汇总表上补 Wilcoxon 与 Friedman/Nemenyi 检验，降低“只看均值”的争议。
 5. 论文与结果说明中明确区分：`FMGDA` 是原生联邦多目标 baseline，`FedAvg+LS / PCGrad / CAGrad` 是统一联邦外壳下的适配 baseline。
 6. 跑完后复核 `avg_round_time` 与 `avg_upload_bytes`，只在通信和时间指标真实站得住时再写效率结论。
+7. 只有当 exact local UPGrad 主干验证有效后，才重新考虑加入 AdaptiveRescaling、local/global momentum、alignment-aware weighting、stochastic Gramian 或 weight reuse。
 
 ## 五、参数设置
 
@@ -241,10 +242,12 @@ Phase 5 当前默认使用的 NFJD 主线版本为：
 | num_clients | 10 | 10 |
 | 联邦外壳 | NFJD Δθ aggregation | FMGDA objective-wise aggregation / FedAvg local-delta wrapper |
 | 本地多目标规则 | NFJD | FMGDA / LS / PCGrad / CAGrad |
-| use_adaptive_rescaling | True | N/A |
-| use_stochastic_gramian | True | N/A |
-| local_momentum_beta | 0.9 | N/A |
-| global_momentum_beta | 0.9 | N/A |
+| exact_upgrad | True | N/A |
+| use_objective_normalization | True | N/A |
+| use_adaptive_rescaling | False | N/A |
+| use_stochastic_gramian | False | N/A |
+| local_momentum_beta | 0.0 | N/A |
+| global_momentum_beta | 0.0 | N/A |
 
 **模型架构**：LeNet-5 变体（共享卷积骨干 + 2个分类头）
 
@@ -269,11 +272,13 @@ Phase 5 当前默认使用的 NFJD 主线版本为：
 | participation_rate | 0.5 | 0.5 |
 | num_clients | 10 | 10 |
 | 联邦外壳 | NFJD Δθ aggregation | FMGDA objective-wise aggregation / FedAvg local-delta wrapper |
-| use_adaptive_rescaling | True | N/A |
-| use_stochastic_gramian | True(高m任务) | N/A |
+| exact_upgrad | True | N/A |
+| use_objective_normalization | True | N/A |
+| use_adaptive_rescaling | False | N/A |
+| use_stochastic_gramian | False | N/A |
 | stochastic_subset_size | 4 | N/A |
-| local_momentum_beta | 0.9 | N/A |
-| global_momentum_beta | 0.9 | N/A |
+| local_momentum_beta | 0.0 | N/A |
+| global_momentum_beta | 0.0 | N/A |
 
 补充：
 
@@ -359,9 +364,9 @@ Phase 5 当前默认使用的 NFJD 主线版本为：
 | FedAvg+LS | 标准标量化基线 | ~2.1MB |
 
 **关键预期**：
-- NFJD 应在与正式 baseline 相同联邦预算下取得更优或至少更稳健的测试性能
+- NFJD 主线先验证 exact local UPGrad + objective normalization 这条最强骨架本身是否有效
 - Phase 5 重点验证“同级通信预算下的性能优势”，而不是依赖 Jacobian 上传差距
-- 所有方法都应在 validation 指标与 test 指标之间保持一致趋势
+- 若该主干仍不占优，则后续不应继续盲目叠加 server 侧启发式
 
 ### 7.2 River Flow / CelebA 预期
 
@@ -374,9 +379,9 @@ Phase 5 当前默认使用的 NFJD 主线版本为：
 | FedAvg+LS | 标准标量化基线 | ~120KB |
 
 **关键预期**：
-- NFJD 与正式 baseline 具有相近上传量，但应在高 m 任务上保留更好的目标协调能力
-- StochasticGramian 在 m=8 时应显著降低客户端计算开销（subset_size=4 vs 全量8）
-- River Flow 的任务冲突较 MultiMNIST 弱，NFJD 的 AdaptiveRescaling 效果可能不如高冲突场景明显
+- NFJD 与正式 baseline 具有相近上传量，但应先验证 exact local UPGrad 主干是否能改善测试指标
+- stochastic / momentum / alignment 等增强项暂不作为主表默认配置
+- River Flow 的任务量纲不一致更强，因此 objective normalization 是否有效是当前最关键观察点之一
 
 ### 7.3 NFJD 优于所有 Baseline 的统计验证
 
