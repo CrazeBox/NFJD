@@ -13,3 +13,14 @@ def multi_task_classification(predictions: torch.Tensor, targets: torch.Tensor, 
         loss = torch.nn.functional.nll_loss(log_probs, task_labels, reduction="mean")
         losses.append(loss)
     return losses
+
+
+def multi_task_binary_classification(predictions: torch.Tensor, targets: torch.Tensor, _inputs: torch.Tensor) -> list[torch.Tensor]:
+    num_tasks = predictions.shape[1]
+    losses = []
+    for t in range(num_tasks):
+        task_logits = predictions[:, t]
+        task_targets = targets[:, t].float()
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(task_logits, task_targets, reduction="mean")
+        losses.append(loss)
+    return losses

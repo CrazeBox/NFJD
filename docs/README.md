@@ -5,6 +5,7 @@
 | File | Description |
 |------|-------------|
 | `NFJD_Method.md` | NFJD完整方法文档（架构设计 + v2对齐分数更新 + FedJD对比） |
+| `NFJD_Status_and_Roadmap.md` | 当前主线状态、已完成修改、后续路线与版本标记建议 |
 | `NFJD_Experiment_Plans/` | Phase 1-5实验计划与检查清单 |
 
 ## Legacy FedJD Documentation

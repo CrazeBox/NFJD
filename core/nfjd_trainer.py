@@ -20,9 +20,12 @@ class NFJDTrainer:
         self.server = server
         self.num_rounds = num_rounds
         self.output_dir = Path(output_dir) if output_dir else None
+        self.initial_objectives: list[float] | None = None
 
     def fit(self) -> list[RoundStats]:
         history: list[RoundStats] = []
+        self.initial_objectives = self.server.evaluate_global_objectives()
+        logger.info("Initial objectives: %s", ", ".join(f"{v:.4f}" for v in self.initial_objectives))
         for round_idx in range(self.num_rounds):
             stats = self.server.run_round(round_idx)
             history.append(stats)
@@ -82,10 +85,11 @@ class NFJDTrainer:
             f.write(f"# NFJD Training Summary\n\n")
             f.write(f"- Method: {history[0].method_name}\n")
             f.write(f"- Rounds: {len(history)}\n")
-            f.write(f"- Initial objectives: {history[0].objective_values}\n")
+            initial = self.initial_objectives if self.initial_objectives is not None else history[0].objective_values
+            f.write(f"- Initial objectives: {initial}\n")
             f.write(f"- Final objectives: {history[-1].objective_values}\n")
             m = len(history[0].objective_values)
-            init = history[0].objective_values
+            init = initial
             final = history[-1].objective_values
             for j in range(m):
                 delta = final[j] - init[j]

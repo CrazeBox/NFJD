@@ -1,28 +1,46 @@
 # NFJD: New Federated Jacobian Descent
 
-Federated multi-objective optimization with communication-efficient Δθ upload, adaptive rescaling, and conflict-aware momentum.
+Federated multi-objective optimization with client-side `UPGrad`-based Jacobian descent, communication-efficient `delta_theta` upload, adaptive rescaling, and server-side stabilization.
+
+## Current Mainline
+
+The current canonical NFJD implementation is:
+
+- client-side local `UPGrad`-based Jacobian descent
+- `recompute_interval` with reuse of the latest local UPGrad weight vector between recomputation steps
+- `StochasticGramianSolver` for high-objective settings
+- `AdaptiveRescaling` + local momentum on clients
+- `delta_theta + align_scores` communication
+- alignment-aware weighted averaging + global momentum on the server
+
+For the current implementation state and future work plan, see:
+
+- `docs/NFJD_Method.md`
+- `docs/NFJD_Status_and_Roadmap.md`
 
 ## Project Structure
 
 ```
 fedjd/
-├── aggregators/          # Jacobian aggregation (MinNorm, Mean, Random)
+├── aggregators/          # Jacobian aggregation (UPGrad, MinNorm, Mean, Random)
 ├── compressors/          # Jacobian compression
 ├── core/                 # Core framework
-│   ├── nfjd_client.py    # NFJDClient (Δθ upload, ConflictAwareMomentum, AdaptiveRescaling)
-│   ├── nfjd_server.py    # NFJDServer (FedAvg + ConflictAware GlobalMomentum)
+│   ├── nfjd_client.py    # NFJDClient (local UPGrad-JD, Δθ upload, local momentum)
+│   ├── nfjd_server.py    # NFJDServer (alignment-aware aggregation + global momentum)
 │   ├── nfjd_trainer.py   # NFJDTrainer
-│   ├── scaling.py        # AdaptiveRescaling, StochasticGramianSolver, ConflictAwareMomentum
+│   ├── scaling.py        # AdaptiveRescaling, StochasticGramianSolver, momentum modules
+│   ├── phase5_official_baselines.py # Paper-sourced Phase 5 baseline wrappers
 │   ├── client.py         # FedJDClient (legacy)
 │   ├── server.py         # FedJDServer (legacy)
 │   ├── trainer.py        # FedJDTrainer (legacy)
 │   └── baselines.py      # FMGDA, WeightedSum, DirectionAvg
 ├── data/                 # Dataset generators
 ├── docs/                 # Documentation
-│   ├── NFJD_Architecture_Design.md
-│   └── NFJD_Experiment_Plans/  # Phase 1-4 plans & checklists
+│   ├── NFJD_Method.md
+│   ├── NFJD_Status_and_Roadmap.md
+│   └── NFJD_Experiment_Plans/  # Phase 1-5 plans & checklists
 ├── experiments/          # Experiment scripts
-│   ├── nfjd_phases/      # NFJD Phase 1-4 experiments
+│   ├── nfjd_phases/      # NFJD Phase 1-6 experiments
 │   └── fedjd_legacy/     # Legacy FedJD Stage 1-5 scripts
 ├── metrics/              # Hypervolume, Pareto front, Pareto gap
 ├── models/               # Small/Medium/Large regressor, classifier
@@ -37,22 +55,22 @@ fedjd/
 |---------|-------|------|
 | Upload content | Jacobian (m×d) | Δθ (d-dim) |
 | Communication vs m | O(m×d) | O(d), decoupled from m |
-| Direction finding | Server-side MinNorm | Client-side MinNorm + StochasticGramian |
+| Local multi-objective core | Server-side MinNorm | Client-side UPGrad-JD + StochasticGramian |
 | Scaling | None | AdaptiveRescaling |
-| Momentum | None | ConflictAwareMomentum (auto-adjusts β by gradient consistency) |
+| Server stabilization | Mean update | Alignment-aware weighted average + global momentum |
 | Local epochs | 1 | Configurable (default 3) |
 
-## ConflictAwareMomentum
+## Server Stabilization
 
-Dynamic momentum coefficient based on gradient consistency:
+The current NFJD mainline uses:
 
 ```
-avg_cosine_sim = mean of pairwise cosine similarities of objective gradients
-effective_beta = max(base_beta * (1.0 - avg_cosine_sim), min_beta)
+1. alignment-aware client reweighting using align_scores
+2. weighted averaging of delta_theta
+3. global momentum on the aggregated update
 ```
 
-- High consistency (sim→1) → low β → less inertia, faster convergence
-- High conflict (sim→0) → high β → momentum smooths conflicting directions
+This is the practical federated version currently recommended for experiments.
 
 ## Quick Start
 
@@ -70,7 +88,7 @@ clients = [NFJDClient(client_id=i, dataset=data.client_datasets[i], batch_size=3
                        device=device, conflict_aware_momentum=True) for i in range(10)]
 server = NFJDServer(model=model, clients=clients, objective_fn=multi_objective_regression,
                     participation_rate=0.5, learning_rate=0.01, device=device,
-                    conflict_aware_momentum=True)
+                    global_momentum_beta=0.9)
 trainer = NFJDTrainer(server=server, num_rounds=50)
 history = trainer.fit()
 ```

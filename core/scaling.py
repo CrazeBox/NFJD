@@ -4,7 +4,7 @@ import random
 
 import torch
 
-from fedjd.aggregators import MinNormAggregator, _project_simplex
+from fedjd.aggregators import MinNormAggregator, UPGradAggregator, _project_simplex
 
 
 class AdaptiveRescaling:
@@ -27,13 +27,23 @@ class AdaptiveRescaling:
 
 
 class StochasticGramianSolver:
-    def __init__(self, subset_size: int = 4, max_iters: int = 250, lr: float = 0.1, seed: int | None = None):
+    def __init__(self, subset_size: int = 4, max_iters: int = 250, lr: float = 0.1, seed: int | None = None, mode: str = "minnorm"):
         self.subset_size = subset_size
         self.max_iters = max_iters
         self.lr = lr
         self.rng = random.Random(seed)
         self.last_indices: list[int] = []
         self._last_lambda: torch.Tensor | None = None
+        self.mode = mode
+
+    def _solve_local(self, jacobian: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.mode == "minnorm":
+            aggregator = MinNormAggregator(max_iters=self.max_iters, lr=self.lr)
+            return aggregator.solve(jacobian)
+        if self.mode == "upgrad":
+            aggregator = UPGradAggregator(max_iters=self.max_iters, lr=self.lr)
+            return aggregator.solve(jacobian)
+        raise ValueError(f"Unsupported stochastic solver mode: {self.mode}")
 
     def sample_indices(self, num_objectives: int) -> list[int]:
         if num_objectives <= self.subset_size:
@@ -54,22 +64,26 @@ class StochasticGramianSolver:
             raise ValueError("At least one objective must be sampled.")
 
         if sampled_count == 1:
-            lambdas = torch.ones(1, dtype=sampled_jacobian.dtype, device=sampled_jacobian.device)
-        else:
+            weights = torch.ones(1, dtype=sampled_jacobian.dtype, device=sampled_jacobian.device)
+            direction = sampled_jacobian[0]
+        elif self.mode == "minnorm":
             sub_gramian = sampled_jacobian @ sampled_jacobian.T
-            lambdas = torch.full(
+            weights = torch.full(
                 (sampled_count,),
                 1.0 / sampled_count,
                 dtype=sampled_jacobian.dtype,
                 device=sampled_jacobian.device,
             )
             for _ in range(self.max_iters):
-                gradient = sub_gramian @ lambdas
-                candidate = _project_simplex(lambdas - self.lr * gradient)
-                if torch.norm(candidate - lambdas, p=2) <= 1e-8:
-                    lambdas = candidate
+                gradient = sub_gramian @ weights
+                candidate = _project_simplex(weights - self.lr * gradient)
+                if torch.norm(candidate - weights, p=2) <= 1e-8:
+                    weights = candidate
                     break
-                lambdas = candidate
+                weights = candidate
+            direction = sampled_jacobian.T @ weights
+        else:
+            direction, weights = self._solve_local(sampled_jacobian)
 
         full_lambda = torch.zeros(
             total_objectives,
@@ -77,9 +91,8 @@ class StochasticGramianSolver:
             device=sampled_jacobian.device,
         )
         for i, idx in enumerate(sampled_indices):
-            full_lambda[idx] = lambdas[i]
+            full_lambda[idx] = weights[i]
 
-        direction = sampled_jacobian.T @ lambdas
         self.last_lambda = full_lambda
         self.last_indices = list(sampled_indices)
         return direction, self.last_indices
@@ -90,10 +103,9 @@ class StochasticGramianSolver:
 
         m = jacobian.shape[0]
         if m <= self.subset_size:
-            aggregator = MinNormAggregator(max_iters=self.max_iters, lr=self.lr)
-            direction = aggregator(jacobian)
+            direction, weights = self._solve_local(jacobian)
             self.last_indices = list(range(m))
-            self.last_lambda = torch.ones(m, dtype=jacobian.dtype, device=jacobian.device) / max(m, 1)
+            self.last_lambda = weights
             return direction, self.last_indices
 
         indices = self.sample_indices(m)

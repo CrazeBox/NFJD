@@ -36,7 +36,6 @@ class CelebaCNN(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(512, num_attributes),
-            nn.Sigmoid()  # For binary attributes
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

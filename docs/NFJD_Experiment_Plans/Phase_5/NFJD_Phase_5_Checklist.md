@@ -36,7 +36,7 @@
 | B2.5 | 目标值处理 | 对 8 个目标值做标准化或对数变换（视分布而定） | ⬜ |
 | B2.6 | 时间序列划分 | 按时间顺序前 80% 训练 / 后 20% 测试 | ⬜ |
 | B2.7 | 随机联邦划分正确 | 10 客户端，每客户端 ~625 样本 | ⬜ |
-| B2.8 | 地理联邦划分正确 | 按流域区域分组，不同客户端持有不同区域数据 | ⬜ |
+| B2.8 | Non-IID 联邦划分正确 | 按目标值排序分块后分配，客户端目标分布明显偏斜 | ⬜ |
 | B2.9 | 数据格式与框架兼容 | `FederatedRegressionData` 格式，inputs (B, features)，targets (B, 8) | ⬜ |
 
 ## C. 模型配置确认
@@ -67,22 +67,22 @@
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
-| D1 | STL 基线可运行 | 单任务训练 50 轮，MultiMNIST 准确率 > 95%，River Flow MSE 合理 | ⬜ |
-| D2 | NFJD 在 MultiMNIST 上可运行 | 50 轮训练完成，无 NaN，两个任务准确率 > 85% | ⬜ |
-| D3 | NFJD 在 River Flow 上可运行 | 50 轮训练完成，无 NaN，MSE 持续下降 | ⬜ |
-| D4 | FedJD 在 MultiMNIST 上可运行 | 50 轮训练完成，Jacobian 上传量 = 2×d×4B | ⬜ |
-| D5 | FedJD 在 River Flow 上可运行 | 50 轮训练完成，Jacobian 上传量 = 8×d×4B | ⬜ |
-| D6 | FMGDA/WeightedSum/DirectionAvg 可运行 | 所有基线方法在两个数据集上均可完成 50 轮 | ⬜ |
-| D7 | 通信量统计正确 | NFJD 上传 d×4B，FedJD 上传 m×d×4B，与 Phase 1-4 一致 | ⬜ |
-| D8 | 分类准确率计算正确 | Task L/R 准确率与手动计算一致 | ⬜ |
-| D9 | 回归 MSE 计算正确 | 各任务 MSE 与手动计算一致 | ⬜ |
-| D10 | GPU 训练速度提升 | GPU 上每轮耗时 < CPU 上的 50% | ⬜ |
+| D1 | NFJD 在 MultiMNIST 上可运行 | 50 轮训练完成，无 NaN，两个任务准确率 > 85% | ⬜ |
+| D2 | NFJD 在 River Flow / CelebA 上可运行 | 50 轮训练完成，无 NaN，指标持续改善 | ⬜ |
+| D3 | FedAvg+MGDA-UB 可运行 | 所有数据集 50 轮训练可完成，无异常退出 | ⬜ |
+| D4 | FedAvg+PCGrad 可运行 | 所有数据集 50 轮训练可完成，无异常退出 | ⬜ |
+| D5 | FedAvg+CAGrad 可运行 | 所有数据集 50 轮训练可完成，无异常退出 | ⬜ |
+| D6 | FedAvg+LS 可运行 | 所有数据集 50 轮训练可完成，无异常退出 | ⬜ |
+| D7 | 分类准确率计算正确 | MultiMNIST / CelebA 指标与手动计算一致 | ⬜ |
+| D8 | 回归 MSE 计算正确 | RiverFlow 各任务 MSE 与手动计算一致 | ⬜ |
+| D9 | 来源字段记录正确 | 结果 CSV 中 baseline 来源字段非空 | ⬜ |
+| D10 | GPU 训练速度提升 | GPU 上每轮耗时优于 CPU | ⬜ |
 
 ## E. 结果记录规范
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
-| E1 | CSV 字段完整 | 包含 Phase 5 新增字段（dataset, data_split, model_arch, task_L_acc 等） | ⬜ |
+| E1 | CSV 字段完整 | 包含 `method_display_name/source_paper/source_official_repo` 等来源字段 | ⬜ |
 | E2 | 每次实验独立可复现 | 同种子同配置结果一致 | ⬜ |
 | E3 | 异常实验标记 | 失败/发散实验记录原因，不丢弃 | ⬜ |
 | E4 | 中间结果保存 | 每 10 轮记录一次目标值，用于收敛曲线绘制 | ⬜ |
@@ -92,62 +92,49 @@
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
-| F1 | NFJD Avg Accuracy > FedJD Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
-| F2 | NFJD Avg Accuracy > FMGDA Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
-| F3 | NFJD Avg Accuracy > WeightedSum Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
-| F4 | NFJD Avg Accuracy > DirectionAvg Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
-| F5 | NFJD 通信量 < FedJD 通信量 | NFJD upload = d×4B < FedJD upload = 2×d×4B | ⬜ |
-| F6 | NFJD 通信量 < FMGDA 通信量 | NFJD upload = d×4B < FMGDA upload = 2×d×4B | ⬜ |
-| F7 | NFJD 通信量 ≤ WeightedSum 实际通信量 | WeightedSum 实际传 Jacobian(2×d×4B)，需修正统计 | ⬜ |
-| F8 | NFJD 通信量 ≤ DirectionAvg 实际通信量 | DirectionAvg 实际传 Jacobian(2×d×4B)，需修正统计 | ⬜ |
-| F9 | Non-IID 下 NFJD 仍优于所有 baseline | Avg Accuracy 排名第1，Wilcoxon p < 0.05 | ⬜ |
-| F10 | 所有方法 all_decreased=True | 两个任务准确率均高于初始值 | ⬜ |
-| F11 | STL 上界合理 | 单任务准确率 > 96% | ⬜ |
-| F12 | 收敛曲线平滑 | 无剧烈振荡或发散 | ⬜ |
-| F13 | NFJD 与 STL 差距 < 4% | Avg Accuracy 差距 ≤ 4 个百分点 | ⬜ |
+| F1 | NFJD Avg Accuracy > FedAvg+MGDA-UB Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
+| F2 | NFJD Avg Accuracy > FedAvg+PCGrad Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
+| F3 | NFJD Avg Accuracy > FedAvg+CAGrad Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
+| F4 | NFJD Avg Accuracy > FedAvg+LS Avg Accuracy | IID 设置下，Wilcoxon p < 0.05 | ⬜ |
+| F5 | NFJD 与正式 baseline 通信量同量级 | 全部均为 Δθ 上传，比较性能与稳定性 | ⬜ |
+| F6 | Non-IID 下 NFJD 仍优于所有正式 baseline | Avg Accuracy 排名第1，Wilcoxon p < 0.05 | ⬜ |
+| F7 | 所有方法 all_decreased=True | 两个任务准确率均高于初始值 | ⬜ |
+| F8 | 收敛曲线平滑 | 无剧烈振荡或发散 | ⬜ |
 
 ## G. River Flow 性能检查
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
-| G1 | NFJD Avg MSE < FedJD Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
-| G2 | NFJD Avg MSE < FMGDA Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
-| G3 | NFJD Avg MSE < WeightedSum Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
-| G4 | NFJD Avg MSE < DirectionAvg Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
-| G5 | NFJD 通信量 << FedJD 通信量 | NFJD upload = d×4B vs FedJD upload = 8×d×4B (8×差距) | ⬜ |
-| G6 | NFJD 通信量 << FMGDA 通信量 | 8×差距 | ⬜ |
-| G7 | NFJD 通信量 ≤ WeightedSum 实际通信量 | 需修正 WeightedSum 通信量统计 | ⬜ |
-| G8 | NFJD 通信量 ≤ DirectionAvg 实际通信量 | 需修正 DirectionAvg 通信量统计 | ⬜ |
-| G9 | m=8 时 StochasticGramian 有效 | subset_size=4 vs 全量8，MSE 差距 < 5%，速度提升显著 | ⬜ |
-| G10 | 地理划分下 NFJD 仍优于所有 baseline | Avg MSE 排名第1，Wilcoxon p < 0.05 | ⬜ |
-| G11 | 所有 8 个目标均下降 | per_task_mse 均低于初始值 | ⬜ |
-| G12 | MSE 标准差合理 | 无单任务 MSE 异常高（> 平均值 3 倍） | ⬜ |
-| G13 | 目标数扩展性 | m=2→4→8 时 NFJD 性能下降 < FedJD 性能下降 | ⬜ |
-| G14 | NFJD Avg MSE ≈ STL | 差距 < 10%（MTL应接近单任务上界） | ⬜ |
+| G1 | NFJD Avg MSE < FedAvg+MGDA-UB Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
+| G2 | NFJD Avg MSE < FedAvg+PCGrad Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
+| G3 | NFJD Avg MSE < FedAvg+CAGrad Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
+| G4 | NFJD Avg MSE < FedAvg+LS Avg MSE | 随机划分，Wilcoxon p < 0.05 | ⬜ |
+| G5 | m=8 时 StochasticGramian 有效 | subset_size=4 vs 全量8，MSE 差距 < 5%，速度提升显著 | ⬜ |
+| G6 | Non-IID 划分下 NFJD 仍优于所有正式 baseline | Avg MSE 排名第1，Wilcoxon p < 0.05 | ⬜ |
+| G7 | 所有 8 个目标均下降 | per_task_mse 均低于初始值 | ⬜ |
+| G8 | MSE 标准差合理 | 无单任务 MSE 异常高（> 平均值 3 倍） | ⬜ |
 
 ## H. 统计验证检查
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
 | H1 | Friedman 检验：5个方法间存在显著差异 | p < 0.05 | ⬜ |
-| H2 | Nemenyi 事后检验：NFJD 平均排名最优 | NFJD 平均排名 = 1 | ⬜ |
-| H3 | NFJD vs FedJD 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
-| H4 | NFJD vs FMGDA 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
-| H5 | NFJD vs WeightedSum 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
-| H6 | NFJD vs DirectionAvg 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
-| H7 | 通信-性能双优势成立 | NFJD 通信更低 且 性能更好（vs FedJD/FMGDA） | ⬜ |
-| H8 | 通信效率比随m增大而下降 | m=2: ~0.50, m=4: ~0.25, m=8: ~0.125 | ⬜ |
-| H9 | CD图（临界差图）已生成 | 可视化方法间排名差异 | ⬜ |
-| H10 | 验证结果汇总表已填写 | 包含 mean±std, p-value, 排名 | ⬜ |
+| H2 | Nemenyi 事后检验已完成 | 形成正式多方法排名比较 | ⬜ |
+| H3 | NFJD vs FedAvg+MGDA-UB 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
+| H4 | NFJD vs FedAvg+PCGrad 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
+| H5 | NFJD vs FedAvg+CAGrad 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
+| H6 | NFJD vs FedAvg+LS 配对 Wilcoxon 显著 | p < 0.05（性能指标） | ⬜ |
+| H7 | CD图（临界差图）已生成 | 可视化方法间排名差异 | ⬜ |
+| H8 | 验证结果汇总表已填写 | 包含 mean±std, p-value, 排名 | ⬜ |
 
 ## I. 与文献对齐
 
 | # | 检查项 | 通过标准 | 状态 |
 |---|--------|----------|------|
 | I1 | MultiMNIST 生成方式与 Sener & Koltun 2018 一致 | 偏移范围、叠加方式相同 | ⬜ |
-| I2 | WeightedSum 基线准确率在文献范围内 | 88-96% | ⬜ |
-| I3 | FMGDA 基线准确率在文献范围内 | 89-95% | ⬜ |
-| I4 | River Flow 预处理与 Navon et al. 2022 (Nash-MTL) 一致 | 相同的特征标准化和划分方式 | ⬜ |
+| I2 | Phase 5 baseline 来源字段已写入 CSV | `source_paper/source_official_repo` 非空 | ⬜ |
+| I3 | PCGrad/CAGrad/MGDA-UB/LS 的文档来源可追溯 | 与 `Phase5_Official_Baselines.md` 一致 | ⬜ |
+| I4 | River Flow 预处理与 Phase 5 文档一致 | train/val/test 统一标准化策略 | ⬜ |
 
 ## 通过判定
 
@@ -159,8 +146,8 @@
 | 评估流程 | D1-D10 全部通过 | | ⬜ |
 | 结果记录 | E1-E5 全部通过 | | ⬜ |
 | MultiMNIST 性能 | F1-F13 全部通过 | | ⬜ |
-| River Flow 性能 | G1-G14 全部通过 | | ⬜ |
-| 统计验证 | H1-H10 全部通过 | | ⬜ |
+| River Flow / CelebA 性能 | G1-G8 全部通过 | | ⬜ |
+| 统计验证 | H1-H8 全部通过 | | ⬜ |
 | 文献对齐 | I1-I4 全部通过 | | ⬜ |
 
 **Phase 5 总判定: ⬜ PASS / ⬜ FAIL**

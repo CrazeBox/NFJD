@@ -26,10 +26,9 @@ def compute_f1_scores(predictions: torch.Tensor, targets: torch.Tensor, num_task
     f1_scores = []
     with torch.no_grad():
         for t in range(num_tasks):
-            pred_labels = predictions[:, t].argmax(dim=-1)
+            pred_labels, num_classes = _task_pred_labels(predictions[:, t])
             true_labels = targets[:, t].long()
-            num_classes = predictions[:, t].shape[-1] if predictions[:, t].dim() > 1 else 2
-            if predictions[:, t].dim() > 1 and num_classes > 2:
+            if num_classes > 2:
                 f1 = _macro_f1(pred_labels, true_labels, num_classes)
             else:
                 tp = ((pred_labels == 1) & (true_labels == 1)).sum().float()
@@ -60,10 +59,24 @@ def compute_accuracy(predictions: torch.Tensor, targets: torch.Tensor, num_tasks
     correct = [0] * num_tasks
     with torch.no_grad():
         for t in range(num_tasks):
-            pred_labels = predictions[:, t].argmax(dim=-1)
+            pred_labels, _ = _task_pred_labels(predictions[:, t])
             true_labels = targets[:, t].long()
             correct[t] += (pred_labels == true_labels).sum().item()
     return [c / max(total, 1) for c in correct]
+
+
+def _task_pred_labels(task_predictions: torch.Tensor) -> tuple[torch.Tensor, int]:
+    if task_predictions.dim() <= 1:
+        flat_predictions = task_predictions.reshape(-1)
+        if flat_predictions.numel() == 0:
+            return flat_predictions.long(), 2
+        min_val = float(flat_predictions.min().item())
+        max_val = float(flat_predictions.max().item())
+        threshold = 0.5 if 0.0 <= min_val and max_val <= 1.0 else 0.0
+        return (flat_predictions >= threshold).long(), 2
+
+    num_classes = int(task_predictions.shape[-1])
+    return task_predictions.argmax(dim=-1), num_classes
 
 
 def compute_mse_per_task(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:

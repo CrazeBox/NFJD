@@ -13,6 +13,7 @@ from fedjd.aggregators import JacobianAggregator
 from fedjd.compressors import JacobianCompressor, NoCompressor
 
 from .client import FedJDClient, ObjectiveFn, _measure_peak_memory
+from .evaluation import evaluate_objectives_on_dataset
 
 
 @dataclass
@@ -74,6 +75,7 @@ class FedJDServer:
         compressor: JacobianCompressor | None = None,
         full_sync_interval: int = 1,
         local_steps: int = 1,
+        eval_dataset=None,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -85,6 +87,7 @@ class FedJDServer:
         self.compressor = compressor or NoCompressor()
         self.full_sync_interval = full_sync_interval
         self.local_steps = local_steps
+        self.eval_dataset = eval_dataset
         self._last_direction: torch.Tensor | None = None
 
     def sample_clients(self) -> list[FedJDClient]:
@@ -104,11 +107,12 @@ class FedJDServer:
     def run_round(self, round_idx: int) -> RoundStats:
         round_start = time.time()
         is_full_sync = self._is_full_sync_round(round_idx)
+        current_flat = flatten_parameters(self.model.parameters())
+        model_bytes = current_flat.numel() * current_flat.element_size()
 
         if not is_full_sync and self._last_direction is not None:
             direction = self._last_direction
             update_start = time.time()
-            current_flat = flatten_parameters(self.model.parameters())
             for _ in range(self.local_steps):
                 current_flat = current_flat - self.learning_rate * direction
             assign_flat_parameters(self.model.parameters(), current_flat)
@@ -124,7 +128,7 @@ class FedJDServer:
                 jacobian_norm=0.0,
                 round_time=round_time,
                 upload_bytes=0,
-                download_bytes=current_flat.numel() * current_flat.element_size(),
+                download_bytes=0,
                 nan_inf_count=0,
                 client_compute_time=0.0,
                 client_serialize_time=0.0,
@@ -134,7 +138,7 @@ class FedJDServer:
                 client_peak_memory_mb=0.0,
                 server_peak_memory_mb=_measure_peak_memory(),
                 jacobian_upload_per_client=0,
-                gradient_upload_per_client=current_flat.numel() * current_flat.element_size(),
+                gradient_upload_per_client=model_bytes,
                 jacobian_vs_gradient_ratio=0.0,
                 compressor_name=self.compressor.name,
                 compressed_upload_per_client=0,
@@ -201,13 +205,12 @@ class FedJDServer:
         total_nan_inf += _count_nan_inf(direction)
 
         update_start = time.time()
-        current_flat = flatten_parameters(self.model.parameters())
         for _ in range(self.local_steps):
             current_flat = current_flat - self.learning_rate * direction
         assign_flat_parameters(self.model.parameters(), current_flat)
         update_time = time.time() - update_start
 
-        download_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled_clients)
 
         num_params = current_flat.numel()
         num_objectives = aggregated_jacobian.shape[0]
@@ -248,25 +251,32 @@ class FedJDServer:
         )
 
     def evaluate_global_objectives(self) -> list[float]:
+        if self.eval_dataset is not None:
+            return evaluate_objectives_on_dataset(self.model, self.eval_dataset, self.objective_fn, self.device)
+
         total_examples = sum(client.num_examples for client in self.clients)
         running = None
         self.model.eval()
         with torch.no_grad():
             for client in self.clients:
                 loader = DataLoader(client.dataset, batch_size=256, shuffle=False)
-                client_values = []
+                client_sum = None
+                client_weight = 0
                 for batch_inputs, batch_targets in loader:
                     batch_inputs = batch_inputs.to(self.device)
                     batch_targets = batch_targets.to(self.device)
                     predictions = self.model(batch_inputs)
                     values = self.objective_fn(predictions, batch_targets, batch_inputs)
                     stacked = torch.stack([value.detach() for value in values])
-                    if stacked.dim() == 2:
-                        client_values.append(stacked.mean(dim=1))
+                    batch_values = stacked.reshape(stacked.shape[0], -1).mean(dim=1)
+                    batch_size = int(batch_inputs.shape[0])
+                    if client_sum is None:
+                        client_sum = batch_values * batch_size
                     else:
-                        client_values.append(stacked)
-                if client_values:
-                    avg_values = torch.stack(client_values).mean(dim=0)
+                        client_sum.add_(batch_values, alpha=batch_size)
+                    client_weight += batch_size
+                if client_sum is not None and client_weight > 0:
+                    avg_values = client_sum / client_weight
                     weight = client.num_examples / total_examples
                     if running is None:
                         running = weight * avg_values

@@ -22,6 +22,17 @@ class ClientResult:
     peak_memory_mb: float = 0.0
 
 
+@dataclass
+class VectorClientResult:
+    client_id: int
+    vector: torch.Tensor
+    num_examples: int
+    compute_time: float = 0.0
+    serialize_time: float = 0.0
+    upload_bytes: int = 0
+    peak_memory_mb: float = 0.0
+
+
 def flatten_gradients(parameters) -> torch.Tensor:
     chunks = []
     for parameter in parameters:
@@ -128,12 +139,78 @@ class FedJDClient:
             peak_memory_mb=peak_memory_mb,
         )
 
+    def compute_weighted_gradient(
+        self,
+        model: nn.Module,
+        objective_fn: ObjectiveFn,
+        weights: torch.Tensor | None = None,
+    ) -> VectorClientResult:
+        import time
+
+        start = time.time()
+
+        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+        gradient_sum = None
+        total_weight = 0
+        epoch_count = self.local_epochs if self.use_full_loader else 1
+
+        for _ in range(epoch_count):
+            for batch_inputs, batch_targets in loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+
+                model.zero_grad(set_to_none=True)
+                predictions = model(batch_inputs)
+                objective_values = objective_fn(predictions, batch_targets, batch_inputs)
+                if weights is None:
+                    batch_weights = torch.ones(len(objective_values), device=self.device, dtype=objective_values[0].dtype) / max(len(objective_values), 1)
+                else:
+                    batch_weights = weights.to(self.device, dtype=objective_values[0].dtype)
+
+                weighted_loss = sum(batch_weights[idx] * objective_values[idx] for idx in range(len(objective_values)))
+                weighted_loss.backward()
+                batch_gradient = flatten_gradients(model.parameters())
+                model.zero_grad(set_to_none=True)
+
+                batch_weight = int(batch_inputs.shape[0])
+                if gradient_sum is None:
+                    gradient_sum = batch_gradient * batch_weight
+                else:
+                    gradient_sum.add_(batch_gradient, alpha=batch_weight)
+                total_weight += batch_weight
+
+                if not self.use_full_loader:
+                    break
+
+        if gradient_sum is None or total_weight == 0:
+            raise RuntimeError("No batch available to compute weighted gradient.")
+
+        gradient = gradient_sum / total_weight
+        compute_time = time.time() - start
+
+        serialize_start = time.time()
+        upload_bytes = gradient.numel() * gradient.element_size()
+        serialize_time = time.time() - serialize_start
+
+        peak_memory_mb = _measure_peak_memory()
+
+        return VectorClientResult(
+            client_id=self.client_id,
+            vector=gradient,
+            num_examples=self.num_examples,
+            compute_time=compute_time,
+            serialize_time=serialize_time,
+            upload_bytes=upload_bytes,
+            peak_memory_mb=peak_memory_mb,
+        )
+
     def full_dataset_objectives(
         self, model: nn.Module, objective_fn: ObjectiveFn
     ) -> list[float]:
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False)
         model.eval()
         all_values = None
+        total_weight = 0
         with torch.no_grad():
             for batch_inputs, batch_targets in loader:
                 batch_inputs = batch_inputs.to(self.device)
@@ -141,12 +218,15 @@ class FedJDClient:
                 predictions = model(batch_inputs)
                 values = objective_fn(predictions, batch_targets, batch_inputs)
                 stacked = torch.stack([v.detach() for v in values])
+                batch_values = stacked.reshape(stacked.shape[0], -1).mean(dim=1)
+                batch_weight = int(batch_inputs.shape[0])
                 if all_values is None:
-                    all_values = stacked
+                    all_values = batch_values * batch_weight
                 else:
-                    all_values = torch.cat([all_values, stacked], dim=1)
+                    all_values.add_(batch_values, alpha=batch_weight)
+                total_weight += batch_weight
         model.train()
-        if all_values is None:
+        if all_values is None or total_weight == 0:
             return [float("nan")]
-        means = all_values.mean(dim=1)
+        means = all_values / total_weight
         return [float(v.item()) for v in means]

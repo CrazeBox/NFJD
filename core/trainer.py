@@ -27,6 +27,7 @@ class FedJDTrainer:
         self.output_dir = Path(output_dir) if output_dir else None
         self.save_checkpoints = save_checkpoints
         self.checkpoint_interval = checkpoint_interval
+        self.initial_objectives: list[float] | None = None
 
     def fit(self) -> list[RoundStats]:
         if self.output_dir:
@@ -36,8 +37,8 @@ class FedJDTrainer:
         total_start = time.time()
 
         logger.info("Starting FedJD training for %d rounds", self.num_rounds)
-        initial_objectives = self.server.evaluate_global_objectives()
-        logger.info("Initial objectives: %s", _fmt_objectives(initial_objectives))
+        self.initial_objectives = self.server.evaluate_global_objectives()
+        logger.info("Initial objectives: %s", _fmt_objectives(self.initial_objectives))
 
         for round_idx in range(self.num_rounds):
             stats = self.server.run_round(round_idx)
@@ -167,7 +168,7 @@ class FedJDTrainer:
 
     def _save_summary(self, history: list[RoundStats], total_time: float) -> None:
         num_objectives = len(history[0].objective_values) if history else 0
-        initial = history[0].objective_values if history else []
+        initial = self.initial_objectives if self.initial_objectives is not None else []
         final = history[-1].objective_values if history else []
 
         total_upload = sum(s.upload_bytes for s in history)

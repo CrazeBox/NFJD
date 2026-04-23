@@ -18,7 +18,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_synthetic_federated_regression, make_high_conflict_federated_regression
-from fedjd.metrics import jain_fairness_index, min_max_gap
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 ALL_FIELDNAMES = [
     "exp_id", "recompute_interval", "dataset", "m", "seed", "num_rounds",
     "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
-    "avg_relative_improvement", "avg_round_time",
+    "task_jfi", "task_mmag", "avg_relative_improvement", "avg_ri", "avg_round_time",
 ]
 MAX_M = 10
 for i in range(MAX_M):
@@ -70,7 +70,7 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
             device=device, local_epochs=3, learning_rate=learning_rate,
             local_momentum_beta=0.9, use_adaptive_rescaling=True,
             use_stochastic_gramian=True, stochastic_subset_size=4,
-            stochastic_seed=seed, recompute_interval=recompute_interval,
+            stochastic_seed=seed + i, recompute_interval=recompute_interval,
         )
         for i in range(num_clients)
     ]
@@ -78,25 +78,19 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
         model=model, clients=clients, objective_fn=multi_objective_regression,
         participation_rate=participation_rate, learning_rate=learning_rate,
         device=device, global_momentum_beta=0.9,
+        parallel_clients=False, eval_dataset=fed_data.val_dataset,
     )
     trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
 
     start = time.time()
+    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
 
-    initial_obj = history[0].objective_values
-    final_obj = history[-1].objective_values
-    obj_history = [s.objective_values for s in history]
-    all_decreased = all(final_obj[j] <= initial_obj[j] for j in range(m))
-
-    ri_sum = 0.0
-    for j in range(m):
-        if abs(initial_obj[j]) > 1e-10:
-            ri_sum += (initial_obj[j] - final_obj[j]) / abs(initial_obj[j])
-        else:
-            ri_sum += 1.0 if final_obj[j] < abs(initial_obj[j]) else 0.0
-    avg_ri = ri_sum / m
+    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
+    final_obj = objective_summary["final_obj"]
+    all_decreased = bool(objective_summary["all_decreased"])
+    avg_ri = float(objective_summary["avg_ri"])
 
     avg_round_time = sum(s.round_time for s in history) / max(len(history), 1)
 
@@ -109,8 +103,11 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
         "num_rounds": num_rounds,
         "elapsed_time": round(elapsed, 2),
         "all_decreased": all_decreased,
-        "hypervolume": round(hv, 6),
-        "pareto_gap": round(pg, 6),
+        "hypervolume": round(float(objective_summary["hypervolume"]), 6),
+        "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),
+        "task_jfi": round(float(objective_summary["task_jfi"]), 6),
+        "task_mmag": round(float(objective_summary["task_mmag"]), 6),
+        "avg_relative_improvement": round(avg_ri, 6),
         "avg_ri": round(avg_ri, 6),
         "avg_round_time": round(avg_round_time, 4),
     }
@@ -126,8 +123,8 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
 
     speedup = 1.0
     logger.info(
-        "[%s] RI=%.4f JFI= time=%.1fs round_time=%.4fs",
-        exp_id, avg_ri, hv, elapsed, avg_round_time,
+        "[%s] RI=%.4f JFI=%.4f time=%.1fs round_time=%.4fs",
+        exp_id, avg_ri, float(objective_summary["task_jfi"]), elapsed, avg_round_time,
     )
     return row
 
@@ -185,7 +182,7 @@ def main():
         ri_rows = [r for r in all_rows if r["recompute_interval"] == ri]
         if not ri_rows:
             continue
-        avg_ri = sum(r["avg_relative_improvement"] for r in ri_rows) / len(ri_rows)
+        avg_ri = sum(r["avg_ri"] for r in ri_rows) / len(ri_rows)
         avg_jfi = sum(r["hypervolume"] for r in ri_rows) / len(ri_rows)
         avg_time = sum(r["elapsed_time"] for r in ri_rows) / len(ri_rows)
         avg_rt = sum(r["avg_round_time"] for r in ri_rows) / len(ri_rows)

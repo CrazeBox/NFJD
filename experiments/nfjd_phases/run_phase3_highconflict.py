@@ -16,8 +16,8 @@ from fedjd.core import (
     DirectionAvgServer, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
 from fedjd.data import make_high_conflict_federated_regression
-from fedjd.metrics import jain_fairness_index, min_max_gap
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -33,7 +33,7 @@ ALL_FIELDNAMES = [
     "model_size", "local_epochs", "use_adaptive_rescaling",
     "use_stochastic_gramian", "conflict_aware_momentum",
     "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
-    "avg_relative_improvement", "avg_upload_bytes", "avg_round_time",
+    "task_jfi", "task_mmag", "avg_relative_improvement", "avg_ri", "avg_upload_bytes", "avg_round_time",
     "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
 ]
 MAX_M = 10
@@ -62,54 +62,48 @@ def _run_single(method, m, seed, conflict_strength, num_rounds=50,
                               device=device, local_epochs=local_epochs, learning_rate=learning_rate,
                               local_momentum_beta=0.9, use_adaptive_rescaling=use_adaptive_rescaling,
                               use_stochastic_gramian=use_stochastic_gramian, stochastic_subset_size=4,
-                              stochastic_seed=seed, conflict_aware_momentum=conflict_aware_momentum,
+                              stochastic_seed=seed + i, conflict_aware_momentum=conflict_aware_momentum,
                               momentum_min_beta=0.1) for i in range(num_clients)]
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
                             device=device, global_momentum_beta=0.9,
                             conflict_aware_momentum=conflict_aware_momentum,
-                            momentum_min_beta=0.1)
+                            momentum_min_beta=0.1, parallel_clients=False,
+                            eval_dataset=fed_data.val_dataset)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
         aggregator = MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
-        server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
+        server = FedJDServer(model=model, clients=clients, aggregator=aggregator, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fmgda":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
-        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
+        server = FMGDAServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "weighted_sum":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
-        server = WeightedSumServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
+        server = WeightedSumServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "direction_avg":
-        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device) for i in range(num_clients)]
-        server = DirectionAvgServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device)
+        clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]
+        server = DirectionAvgServer(model=model, clients=clients, objective_fn=objective_fn, participation_rate=participation_rate, learning_rate=learning_rate, device=device, eval_dataset=fed_data.val_dataset)
         trainer = FedJDTrainer(server=server, num_rounds=num_rounds)
     else:
         raise ValueError(f"Unknown method: {method}")
 
     start = time.time()
+    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
 
-    initial_obj = history[0].objective_values
-    final_obj = history[-1].objective_values
-    obj_history = [s.objective_values for s in history]
-    all_decreased = all(final_obj[j] <= initial_obj[j] for j in range(m))
-
-    ri_sum = 0.0
-    for j in range(m):
-        if abs(initial_obj[j]) > 1e-10:
-            ri_sum += (initial_obj[j] - final_obj[j]) / abs(initial_obj[j])
-        else:
-            ri_sum += 1.0 if final_obj[j] < abs(initial_obj[j]) else 0.0
-    avg_ri = ri_sum / m
-
-    avg_upload = sum(s.upload_bytes for s in history) / max(len(history), 1)
-    avg_round_time = sum(s.round_time for s in history) / max(len(history), 1)
-    upload_per_client = avg_upload / max(participation_rate * num_clients, 1)
+    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
+    final_obj = objective_summary["final_obj"]
+    avg_ri = float(objective_summary["avg_ri"])
+    all_decreased = bool(objective_summary["all_decreased"])
+    round_summary = summarize_round_history(history)
+    avg_upload = round_summary["avg_upload_bytes"]
+    avg_round_time = round_summary["avg_round_time"]
+    upload_per_client = round_summary["upload_per_client"]
 
     avg_rescale = 1.0
     avg_cosine_sim = 0.0
@@ -132,7 +126,11 @@ def _run_single(method, m, seed, conflict_strength, num_rounds=50,
         "use_stochastic_gramian": use_stochastic_gramian if method == "nfjd" else False,
         "conflict_aware_momentum": conflict_aware_momentum if method == "nfjd" else False,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
-        "task_jfi": 0.0, "task_mmag": 0.0,
+        "hypervolume": round(float(objective_summary["hypervolume"]), 6),
+        "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),
+        "task_jfi": round(float(objective_summary["task_jfi"]), 6),
+        "task_mmag": round(float(objective_summary["task_mmag"]), 6),
+        "avg_relative_improvement": round(avg_ri, 6),
         "avg_ri": round(avg_ri, 6),
         "avg_upload_bytes": round(avg_upload, 0),
         "avg_round_time": round(avg_round_time, 4),
@@ -151,8 +149,8 @@ def _run_single(method, m, seed, conflict_strength, num_rounds=50,
             row[f"final_obj_{i}"] = ""
             row[f"delta_obj_{i}"] = ""
 
-    logger.info("[%s] %s: RI=%.4f JFI= cs=%.2f sim=%.3f beta=%.2f",
-                exp_id, method, avg_ri, conflict_strength, avg_cosine_sim, avg_effective_beta)
+    logger.info("[%s] %s: RI=%.4f JFI=%.4f cs=%.2f sim=%.3f beta=%.2f",
+                exp_id, method, avg_ri, float(objective_summary["task_jfi"]), conflict_strength, avg_cosine_sim, avg_effective_beta)
     return row
 
 

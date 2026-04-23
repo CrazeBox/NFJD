@@ -1,5 +1,7 @@
 # Phase 5 Linux 服务器运行指南
 
+正式 baseline 来源绑定见：`Phase5_Official_Baselines.md`
+
 ## 1. 环境准备
 
 ```bash
@@ -66,14 +68,14 @@ conda activate nfjd
 # 确保在项目根目录
 cd /path/to/workspace/NFJD
 
-# 运行全部 Phase 5 实验（约 120 次，预计 4-8 小时）
-nohup python -m experiments.nfjd_phases.run_phase5_realdata > p5_stdout.log 2>&1 &
+# 运行全部 Phase 5 实验（117 次，分 3 个数据集脚本顺序执行）
+nohup python -m fedjd.experiments.nfjd_phases.run_phase5_suite > p5_stdout.log 2>&1 &
 
 # 查看进度
-tail -f results/nfjd_phase5/p5_run.log
+tail -f results/nfjd_phase5/phase5_suite.log
 
 # 查看进程
-ps aux | grep run_phase5
+ps aux | grep run_phase5_suite
 ```
 
 ### 4.1 分组运行（推荐）
@@ -91,10 +93,10 @@ ps aux | grep run_phase5
 
 ```bash
 # 使用第 0 块 GPU
-CUDA_VISIBLE_DEVICES=0 python experiments/nfjd_phases/run_phase5_realdata.py
+CUDA_VISIBLE_DEVICES=0 python -m fedjd.experiments.nfjd_phases.run_phase5_suite
 
 # 使用第 1 块 GPU
-CUDA_VISIBLE_DEVICES=1 python experiments/nfjd_phases/run_phase5_realdata.py
+CUDA_VISIBLE_DEVICES=1 python -m fedjd.experiments.nfjd_phases.run_phase5_suite
 ```
 
 ## 5. 需要回传的结果
@@ -110,8 +112,10 @@ tar czf phase5_results.tar.gz results/nfjd_phase5/
 
 | 文件 | 说明 |
 |------|------|
-| `results/nfjd_phase5/phase5_results.csv` | **核心结果**：全部 120 次实验的详细数据 |
-| `results/nfjd_phase5/p5_run.log` | 运行日志（含每轮耗时、GPU信息等） |
+| `results/nfjd_phase5/multimnist/phase5_multimnist_results.csv` | MultiMNIST 正式 baseline 结果 |
+| `results/nfjd_phase5/celeba/phase5_celeba_results.csv` | CelebA 正式 baseline 结果 |
+| `results/nfjd_phase5/riverflow/phase5_riverflow_results.csv` | RiverFlow 正式 baseline 结果 |
+| `results/nfjd_phase5/phase5_suite.log` | Phase 5 总入口日志 |
 
 ### 可选回传的文件：
 
@@ -125,20 +129,20 @@ tar czf phase5_results.tar.gz results/nfjd_phase5/
 
 | 字段 | 说明 | 重要性 |
 |------|------|--------|
-| `method` | 方法名 (nfjd/fedjd/fmgda/weighted_sum/direction_avg/stl) | 核心 |
-| `dataset` | 数据集 (multimnist/river_flow) | 核心 |
-| `data_split` | 划分方式 (iid/noniid/geographic) | 核心 |
+| `method` | 方法名 (`nfjd` / `fedavg_ls` / `fedavg_mgda` / `fedavg_pcgrad` / `fedavg_cagrad`) | 核心 |
+| `method_display_name` | 可展示的方法名 | 核心 |
+| `source_paper` | baseline 论文标题 | 核心 |
+| `source_official_repo` | baseline 官方实现仓库 | 核心 |
+| `dataset` | 数据集 (multimnist/celeba/riverflow) | 核心 |
+| `data_split` | 划分方式 (iid/noniid) | 核心 |
 | `m` | 目标数 | 核心 |
-| `avg_relative_improvement` | 平均相对改善 | 核心 |
-| `hypervolume` | 归一化超体积 | 核心 |
+| `avg_ri` | 平均相对改善 | 核心 |
 | `upload_per_client` | 每客户端每轮上传字节数 | 核心 |
 | `avg_round_time` | 每轮平均耗时 | 核心 |
-| `task_L_acc` / `task_R_acc` | MultiMNIST 各任务准确率 | 核心 |
 | `avg_accuracy` | MultiMNIST 平均准确率 | 核心 |
 | `avg_mse` / `max_mse` / `mse_std` | River Flow MSE 指标 | 核心 |
-| `per_task_mse` | River Flow 各任务 MSE | 核心 |
 | `total_local_steps` | 总本地步数 | 公平对比 |
-| `fair_comparison` | 是否为计算量对齐实验 | 公平对比 |
+| `fair_comparison` | Phase 5 中固定为 `False`，不再使用旧 fair 标记实验 | 配置 |
 | `local_epochs` | 本地 epoch 数 | 配置 |
 | `num_rounds` | 总通信轮数 | 配置 |
 
@@ -148,24 +152,24 @@ tar czf phase5_results.tar.gz results/nfjd_phase5/
 
 ```bash
 # 检查实验数量
-wc -l results/nfjd_phase5/phase5_results.csv
-# 预期约 121 行（1行表头 + 约120行数据）
+wc -l results/nfjd_phase5/multimnist/phase5_multimnist_results.csv
+wc -l results/nfjd_phase5/celeba/phase5_celeba_results.csv
+wc -l results/nfjd_phase5/riverflow/phase5_riverflow_results.csv
 
 # 检查各方法实验数
-cut -d',' -f2 results/nfjd_phase5/phase5_results.csv | sort | uniq -c
+cut -d',' -f2 results/nfjd_phase5/multimnist/phase5_multimnist_results.csv | sort | uniq -c
 
 # 检查是否有 NaN
-grep -i "nan\|inf" results/nfjd_phase5/phase5_results.csv
+grep -i "nan\|inf" results/nfjd_phase5/multimnist/phase5_multimnist_results.csv
 
 # 快速查看 NFJD vs 其他方法的 RI
 python -c "
 import csv
-rows = list(csv.DictReader(open('results/nfjd_phase5/phase5_results.csv')))
-for ds in ['multimnist', 'river_flow']:
-    for method in ['nfjd', 'fedjd', 'fmgda', 'weighted_sum', 'direction_avg']:
-        sub = [r for r in rows if r['method']==method and r['dataset']==ds and r['fair_comparison']=='False']
-        if sub:
-            ri = sum(float(r['avg_relative_improvement']) for r in sub)/len(sub)
-            print(f'{ds:12s} {method:15s} avg_RI={ri:.4f} n={len(sub)}')
+rows = list(csv.DictReader(open('results/nfjd_phase5/multimnist/phase5_multimnist_results.csv')))
+for method in ['nfjd', 'fedavg_ls', 'fedavg_mgda', 'fedavg_pcgrad', 'fedavg_cagrad']:
+    sub = [r for r in rows if r['method']==method]
+    if sub:
+        ri = sum(float(r['avg_ri']) for r in sub)/len(sub)
+        print(f'{method:18s} avg_RI={ri:.4f} n={len(sub)}')
 "
 ```

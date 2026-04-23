@@ -113,22 +113,27 @@ def make_river_flow(
     Y = raw[:, n_features:n_features + num_tasks]
 
     n_samples = len(X)
-    n_train = int(n_samples * 0.8)
-    train_X, test_X = X[:n_train], X[n_train:]
-    train_Y, test_Y = Y[:n_train], Y[n_train:]
+    n_train = int(n_samples * 0.7)
+    n_val = int(n_samples * 0.1)
+    train_X, val_X, test_X = X[:n_train], X[n_train:n_train + n_val], X[n_train + n_val:]
+    train_Y, val_Y, test_Y = Y[:n_train], Y[n_train:n_train + n_val], Y[n_train + n_val:]
 
     train_mean = train_X.mean(axis=0)
     train_std = train_X.std(axis=0) + 1e-8
     train_X = (train_X - train_mean) / train_std
+    val_X = (val_X - train_mean) / train_std
     test_X = (test_X - train_mean) / train_std
 
     target_mean = train_Y.mean(axis=0)
     target_std = train_Y.std(axis=0) + 1e-8
     train_Y = (train_Y - target_mean) / target_std
+    val_Y = (val_Y - target_mean) / target_std
     test_Y = (test_Y - target_mean) / target_std
 
     train_X = torch.tensor(train_X, dtype=torch.float32)
     train_Y = torch.tensor(train_Y, dtype=torch.float32)
+    val_X = torch.tensor(val_X, dtype=torch.float32)
+    val_Y = torch.tensor(val_Y, dtype=torch.float32)
     test_X = torch.tensor(test_X, dtype=torch.float32)
     test_Y = torch.tensor(test_Y, dtype=torch.float32)
 
@@ -147,10 +152,12 @@ def make_river_flow(
     for idx in client_indices:
         client_datasets.append(TensorDataset(train_X[idx], train_Y[idx]))
 
+    val_dataset = TensorDataset(val_X, val_Y)
     test_dataset = TensorDataset(test_X, test_Y)
 
     return {
         "client_datasets": client_datasets,
+        "val_dataset": val_dataset,
         "test_dataset": test_dataset,
         "input_dim": n_features,
         "num_objectives": num_tasks,

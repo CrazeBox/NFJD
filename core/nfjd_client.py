@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from fedjd.aggregators import MinNormAggregator
+from fedjd.aggregators import UPGradAggregator
 from fedjd.core.scaling import AdaptiveRescaling, LocalMomentum, StochasticGramianSolver, compute_avg_cosine_sim
 
 ObjectiveFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], list[torch.Tensor]]
@@ -105,6 +105,7 @@ class NFJDClient:
             max_iters=minnorm_max_iters,
             lr=minnorm_lr,
             seed=stochastic_seed,
+            mode="upgrad",
         ) if use_stochastic_gramian else None
         self.conflict_aware_momentum = conflict_aware_momentum
 
@@ -133,6 +134,9 @@ class NFJDClient:
         avg_cosine_sim = 0.0
         aggregator = None
         step_idx = 0
+        rescale_history: list[float] = []
+        cosine_history: list[float] = []
+        last_avg_cosine_sim = 0.0
 
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -147,7 +151,7 @@ class NFJDClient:
                 if m is None:
                     m = len(losses)
                     dynamic_iters = self._compute_dynamic_iters(m)
-                    aggregator = MinNormAggregator(max_iters=dynamic_iters, lr=self.minnorm_lr)
+                    aggregator = UPGradAggregator(max_iters=dynamic_iters, lr=self.minnorm_lr)
                     if self.stochastic_solver is not None:
                         self.stochastic_solver.max_iters = dynamic_iters
 
@@ -179,17 +183,17 @@ class NFJDClient:
                         )
                         final_lambda = self.stochastic_solver.last_lambda
                     else:
-                        direction = aggregator(jacobian)
+                        direction, final_lambda = aggregator.solve(jacobian)
                         sampled_indices = list(range(m))
-                        final_lambda = torch.ones(m, device=jacobian.device) / m
 
                     if self.adaptive_rescaling is not None:
                         direction = self.adaptive_rescaling(direction, jacobian)
                         rescale_factor = self.adaptive_rescaling.last_scale
                         last_rescale_factor = rescale_factor
 
+                    avg_cosine_sim = compute_avg_cosine_sim(jacobian)
+                    last_avg_cosine_sim = avg_cosine_sim
                     if self.conflict_aware_momentum:
-                        avg_cosine_sim = compute_avg_cosine_sim(jacobian)
                         momentum_direction = self.local_momentum.update(direction, jacobian=jacobian)
                     else:
                         momentum_direction = self.local_momentum.update(direction)
@@ -201,6 +205,8 @@ class NFJDClient:
                         L_total.backward()
                         direction = flatten_gradients(model.parameters())
                         model.zero_grad(set_to_none=True)
+                        if self.adaptive_rescaling is not None:
+                            direction = direction * last_rescale_factor
                         rescale_factor = last_rescale_factor
                     else:
                         if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
@@ -228,17 +234,20 @@ class NFJDClient:
                             )
                             final_lambda = self.stochastic_solver.last_lambda
                         else:
-                            direction = aggregator(jacobian)
+                            direction, final_lambda = aggregator.solve(jacobian)
                             sampled_indices = list(range(m))
-                            final_lambda = torch.ones(m, device=jacobian.device) / m
 
                         if self.adaptive_rescaling is not None:
                             direction = self.adaptive_rescaling(direction, jacobian)
                             rescale_factor = self.adaptive_rescaling.last_scale
                             last_rescale_factor = rescale_factor
 
+                        avg_cosine_sim = compute_avg_cosine_sim(jacobian)
+                        last_avg_cosine_sim = avg_cosine_sim
                     momentum_direction = self.local_momentum.update(direction)
 
+                rescale_history.append(last_rescale_factor)
+                cosine_history.append(last_avg_cosine_sim)
                 add_flat_update_(model.parameters(), momentum_direction, alpha=-self.learning_rate)
                 if final_lambda is not None:
                     self.prev_lambda = final_lambda.detach().clone()
@@ -250,7 +259,11 @@ class NFJDClient:
 
         align_scores = None
         if 'jacobian' in locals() and jacobian is not None:
-            align_scores = jacobian @ delta_theta
+            # Positive alignment means the local update is predicted to reduce the objective.
+            align_scores = -(jacobian @ delta_theta)
+
+        avg_rescale_factor = sum(rescale_history) / len(rescale_history) if rescale_history else last_rescale_factor
+        avg_cosine_sim = sum(cosine_history) / len(cosine_history) if cosine_history else last_avg_cosine_sim
 
         return ClientResult(
             client_id=self.client_id,
@@ -259,7 +272,7 @@ class NFJDClient:
             compute_time=compute_time,
             num_local_epochs=self.local_epochs,
             final_lambda=final_lambda,
-            rescale_factor=last_rescale_factor,
+            rescale_factor=avg_rescale_factor,
             sampled_indices=sampled_indices,
             avg_cosine_sim=avg_cosine_sim,
             jacobian=jacobian.detach().clone() if 'jacobian' in locals() else None,
@@ -270,6 +283,7 @@ class NFJDClient:
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False)
         model.eval()
         all_values = None
+        total_weight = 0
         with torch.no_grad():
             for batch_inputs, batch_targets in loader:
                 batch_inputs = batch_inputs.to(self.device)
@@ -277,14 +291,15 @@ class NFJDClient:
                 predictions = model(batch_inputs)
                 values = objective_fn(predictions, batch_targets, batch_inputs)
                 stacked = torch.stack([v.detach() for v in values])
-                if stacked.dim() == 1:
-                    stacked = stacked.unsqueeze(1)
+                batch_values = stacked.reshape(stacked.shape[0], -1).mean(dim=1)
+                batch_weight = int(batch_inputs.shape[0])
                 if all_values is None:
-                    all_values = stacked
+                    all_values = batch_values * batch_weight
                 else:
-                    all_values = torch.cat([all_values, stacked], dim=1)
+                    all_values.add_(batch_values, alpha=batch_weight)
+                total_weight += batch_weight
         model.train()
-        if all_values is None:
+        if all_values is None or total_weight == 0:
             return [float("nan")]
-        means = all_values.mean(dim=1)
+        means = all_values / total_weight
         return [float(v.item()) for v in means]

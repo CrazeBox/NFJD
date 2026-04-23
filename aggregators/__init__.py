@@ -42,6 +42,10 @@ def _project_simplex(vector: torch.Tensor) -> torch.Tensor:
     return torch.clamp(vector - theta, min=0.0)
 
 
+def _project_lower_bound(vector: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
+    return torch.maximum(vector, lower_bound)
+
+
 class MinNormAggregator(JacobianAggregator):
     """MGDA-style minimum-norm direction finder via projected gradient descent on the simplex."""
 
@@ -52,12 +56,17 @@ class MinNormAggregator(JacobianAggregator):
         self.max_direction_norm = max_direction_norm
 
     def __call__(self, jacobian: torch.Tensor) -> torch.Tensor:
+        direction, _ = self.solve(jacobian)
+        return direction
+
+    def solve(self, jacobian: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if jacobian.ndim != 2:
             raise ValueError("Jacobian must have shape [num_objectives, num_params].")
 
         num_objectives = jacobian.shape[0]
         if num_objectives == 1:
             direction = jacobian[0]
+            lambdas = torch.ones(1, dtype=jacobian.dtype, device=jacobian.device)
         else:
             gramian = jacobian @ jacobian.T
             lambdas = torch.full(
@@ -83,7 +92,61 @@ class MinNormAggregator(JacobianAggregator):
             if dir_norm > self.max_direction_norm:
                 direction = direction * (self.max_direction_norm / dir_norm)
 
+        return direction, lambdas.detach().clone()
+
+
+class UPGradAggregator(JacobianAggregator):
+    """UPGrad via the paper's Gramian-space dual formulation."""
+
+    def __init__(self, max_iters: int = 250, lr: float = 0.1, tol: float = 1e-6, max_direction_norm: float = 0.0) -> None:
+        self.max_iters = max_iters
+        self.lr = lr
+        self.tol = tol
+        self.max_direction_norm = max_direction_norm
+
+    def __call__(self, jacobian: torch.Tensor) -> torch.Tensor:
+        direction, _ = self.solve(jacobian)
         return direction
+
+    def solve(self, jacobian: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if jacobian.ndim != 2:
+            raise ValueError("Jacobian must have shape [num_objectives, num_params].")
+
+        num_objectives = jacobian.shape[0]
+        if num_objectives == 1:
+            direction = jacobian[0]
+            weights = torch.ones(1, dtype=jacobian.dtype, device=jacobian.device)
+        else:
+            gramian = jacobian @ jacobian.T
+            gramian = 0.5 * (gramian + gramian.T)
+            lower_bounds = torch.eye(num_objectives, dtype=jacobian.dtype, device=jacobian.device)
+            spectral_norm = torch.linalg.matrix_norm(gramian, ord=2)
+            safe_step = 1.0 / (2.0 * spectral_norm + 1e-8)
+            step_size = min(self.lr, float(safe_step.item())) if torch.isfinite(safe_step) else self.lr
+
+            solutions = []
+            with torch.no_grad():
+                for objective_idx in range(num_objectives):
+                    lower_bound = lower_bounds[objective_idx]
+                    current = lower_bound.clone()
+                    for _ in range(self.max_iters):
+                        gradient = 2.0 * (gramian @ current)
+                        candidate = _project_lower_bound(current - step_size * gradient, lower_bound)
+                        if torch.norm(candidate - current, p=2) <= self.tol:
+                            current = candidate
+                            break
+                        current = candidate
+                    solutions.append(current)
+
+            weights = torch.stack(solutions, dim=0).mean(dim=0)
+            direction = jacobian.T @ weights
+
+        if self.max_direction_norm > 0:
+            dir_norm = torch.norm(direction, p=2)
+            if dir_norm > self.max_direction_norm:
+                direction = direction * (self.max_direction_norm / dir_norm)
+
+        return direction, weights.detach().clone()
 
 
 class MeanAggregator(JacobianAggregator):
@@ -112,4 +175,12 @@ class RandomAggregator(JacobianAggregator):
         return jacobian.T @ weights
 
 
-__all__ = ["JacobianAggregator", "MinNormAggregator", "MeanAggregator", "RandomAggregator", "_project_simplex"]
+__all__ = [
+    "JacobianAggregator",
+    "MinNormAggregator",
+    "UPGradAggregator",
+    "MeanAggregator",
+    "RandomAggregator",
+    "_project_simplex",
+    "_project_lower_bound",
+]

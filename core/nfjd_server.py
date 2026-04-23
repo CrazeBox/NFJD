@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from fedjd.aggregators import MinNormAggregator
 from fedjd.core.scaling import GlobalMomentum
 
+from .evaluation import evaluate_objectives_on_dataset
 from .nfjd_client import NFJDClient, ObjectiveFn, flatten_parameters, assign_flat_parameters, flatten_gradients
 
 
@@ -50,6 +51,7 @@ class NFJDServer:
         conflict_aware_momentum: bool = False,
         momentum_min_beta: float = 0.1,
         parallel_clients: bool | None = None,
+        eval_dataset=None,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -64,6 +66,7 @@ class NFJDServer:
         )
         self.conflict_aware_momentum = conflict_aware_momentum
         self.parallel_clients = device.type != "cuda" if parallel_clients is None else parallel_clients
+        self.eval_dataset = eval_dataset
 
     def sample_clients(self) -> list[NFJDClient]:
         sample_size = max(int(len(self.clients) * self.participation_rate), 1)
@@ -75,26 +78,32 @@ class NFJDServer:
         return cloned
 
     def evaluate_global_objectives(self) -> list[float]:
+        if self.eval_dataset is not None:
+            return evaluate_objectives_on_dataset(self.model, self.eval_dataset, self.objective_fn, self.device)
+
         total_examples = sum(client.num_examples for client in self.clients)
         running = None
         self.model.eval()
         with torch.no_grad():
             for client in self.clients:
                 loader = DataLoader(client.dataset, batch_size=256, shuffle=False)
-                client_values = []
-                client_weights = []
+                client_sum = None
+                client_weight = 0
                 for batch_inputs, batch_targets in loader:
                     batch_inputs = batch_inputs.to(self.device)
                     batch_targets = batch_targets.to(self.device)
                     predictions = self.model(batch_inputs)
                     values = self.objective_fn(predictions, batch_targets, batch_inputs)
                     stacked = torch.stack([value.detach() for value in values])
-                    if stacked.dim() == 2:
-                        client_values.append(stacked.mean(dim=1))
+                    batch_values = stacked.reshape(stacked.shape[0], -1).mean(dim=1)
+                    batch_size = int(batch_inputs.shape[0])
+                    if client_sum is None:
+                        client_sum = batch_values * batch_size
                     else:
-                        client_values.append(stacked)
-                if client_values:
-                    avg_values = torch.stack(client_values).mean(dim=0)
+                        client_sum.add_(batch_values, alpha=batch_size)
+                    client_weight += batch_size
+                if client_sum is not None and client_weight > 0:
+                    avg_values = client_sum / client_weight
                     weight = client.num_examples / total_examples
                     if running is None:
                         running = weight * avg_values
@@ -201,7 +210,8 @@ class NFJDServer:
         assign_flat_parameters(self.model.parameters(), current_flat)
         update_time = time.time() - update_start
 
-        download_bytes = current_flat.numel() * current_flat.element_size()
+        model_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled_clients)
         round_time = time.time() - round_start
 
         avg_rescale = sum(rescale_factors) / len(rescale_factors) if rescale_factors else 1.0

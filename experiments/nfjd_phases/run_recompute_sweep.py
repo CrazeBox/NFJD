@@ -1,4 +1,4 @@
-﻿"""Quick exploration: recompute_interval sweep with lightweight CLI controls."""
+"""Quick exploration: recompute_interval sweep with lightweight CLI controls."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
-from fedjd.metrics import jain_fairness_index, min_max_gap
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -74,7 +74,7 @@ def run_one(
             use_adaptive_rescaling=True,
             use_stochastic_gramian=True,
             stochastic_subset_size=4,
-            stochastic_seed=seed,
+            stochastic_seed=seed + i,
             recompute_interval=recompute_interval,
         )
         for i in range(num_clients)
@@ -88,26 +88,18 @@ def run_one(
         device=device,
         global_momentum_beta=0.9,
         parallel_clients=False,
+        eval_dataset=data.val_dataset,
     )
     trainer = NFJDTrainer(server=server, num_rounds=rounds)
 
     t0 = time.time()
+    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - t0
 
-    init_obj = history[0].objective_values
-    final_obj = history[-1].objective_values
-    obj_history = [s.objective_values for s in history]
-
-    ri_sum = 0.0
-    for j in range(num_objectives):
-        if abs(init_obj[j]) > 1e-10:
-            ri_sum += (init_obj[j] - final_obj[j]) / abs(init_obj[j])
-        else:
-            ri_sum += 1.0 if final_obj[j] < abs(init_obj[j]) else 0.0
-    avg_ri = ri_sum / num_objectives
-
-    all_decreased = all(final_obj[j] <= init_obj[j] for j in range(num_objectives))
+    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
+    avg_ri = float(objective_summary["avg_ri"])
+    all_decreased = bool(objective_summary["all_decreased"])
     avg_round_time = sum(s.round_time for s in history) / max(len(history), 1)
 
     return {
@@ -116,7 +108,8 @@ def run_one(
         "m": num_objectives,
         "seed": seed,
         "avg_ri": avg_ri,
-        "task_jfi": 0.0, "task_mmag": 0.0,
+        "task_jfi": float(objective_summary["task_jfi"]),
+        "task_mmag": float(objective_summary["task_mmag"]),
         "all_decr": all_decreased,
         "elapsed": elapsed,
         "avg_rt": avg_round_time,

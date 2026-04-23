@@ -63,6 +63,10 @@ def make_multimnist(
     train_x, train_y = _generate_pairs(train_images, train_labels, 60000, rng)
     test_x, test_y = _generate_pairs(test_images, test_labels, 10000, rng)
 
+    val_size = max(5000, len(train_x) // 10)
+    val_x, val_y = train_x[:val_size], train_y[:val_size]
+    train_x, train_y = train_x[val_size:], train_y[val_size:]
+
     if iid:
         indices = torch.randperm(len(train_x))
         per_client = len(train_x) // num_clients
@@ -94,9 +98,11 @@ def make_multimnist(
         client_datasets.append(TensorDataset(cx, cy))
 
     test_dataset = TensorDataset(test_x, test_y)
+    val_dataset = TensorDataset(val_x, val_y)
 
     return {
         "client_datasets": client_datasets,
+        "val_dataset": val_dataset,
         "test_dataset": test_dataset,
         "input_dim": (1, image_size, image_size),
         "num_tasks": 2,
