@@ -50,7 +50,7 @@ def _evaluate_global_objectives(model, clients, objective_fn, device):
 
 
 class FMGDAServer:
-    """FMGDA: Federated MGDA. Uploads full Jacobian (same as FedJD), uses fixed equal weights for direction."""
+    """FMGDA: aggregates client Jacobians on the server and applies a min-norm MGDA direction."""
 
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, weights=None, aggregator=None, eval_dataset=None):

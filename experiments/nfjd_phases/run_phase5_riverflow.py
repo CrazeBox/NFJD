@@ -5,7 +5,6 @@ import random
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
@@ -26,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 SEEDS = [7, 42, 123]
-METHODS = ["nfjd", "fedavg_ls", "fedavg_mgda", "fedavg_pcgrad", "fedavg_cagrad"]
+METHODS = ["nfjd", "fmgda", "fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"]
 
 
 def run_riverflow(method, seed, iid=True, num_rounds=50,
@@ -54,7 +53,7 @@ def run_riverflow(method, seed, iid=True, num_rounds=50,
         num_rounds=nr, num_clients=num_clients,
         participation_rate=participation_rate, learning_rate=learning_rate,
         model_arch="river_flow_mlp", dataset="riverflow", data_split=split_name,
-        local_epochs=le, fair_comparison=fair_comparison, eval_dataset=data["val_dataset"],
+        local_epochs=le, eval_dataset=data["val_dataset"],
     )
 
     all_preds, all_targets = evaluate_model(model, data["test_dataset"], device)

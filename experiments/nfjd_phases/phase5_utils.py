@@ -4,12 +4,12 @@ import csv
 import gc
 import logging
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
 
 from fedjd.core import (
+    FedJDClient, FMGDAServer,
     NFJDClient, NFJDServer, NFJDTrainer,
     PHASE5_FORMAL_BASELINES, Phase5OfficialBaselineClient,
     Phase5OfficialBaselineServer, FedJDTrainer, get_phase5_method_spec,
@@ -26,15 +26,14 @@ ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "data_split", "m", "seed", "num_rounds",
     "num_clients", "participation_rate", "learning_rate", "local_epochs",
     "use_adaptive_rescaling", "use_stochastic_gramian", "conflict_aware_momentum",
-    "model_arch", "total_local_steps", "total_local_epoch_budget", "fair_comparison",
-    "method_display_name", "method_family", "source_paper", "source_paper_url", "source_official_repo", "source_note",
+    "model_arch", "total_local_steps",
     "elapsed_time", "all_decreased", "avg_ri",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
     "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
     "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
     "avg_mse", "max_mse", "mse_std",
 ]
-MAX_M = 10
+MAX_M = 8
 for _i in range(MAX_M):
     ALL_FIELDNAMES.extend([f"init_obj_{_i}", f"final_obj_{_i}", f"delta_obj_{_i}"])
 for _i in range(MAX_M):
@@ -62,6 +61,29 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
         )
         return NFJDTrainer(server=server, num_rounds=num_rounds)
 
+    if method == "fmgda":
+        clients = [
+            FedJDClient(
+                client_id=i,
+                dataset=client_datasets[i],
+                batch_size=256,
+                device=device,
+                use_full_loader=True,
+                local_epochs=local_epochs,
+            )
+            for i in range(num_clients)
+        ]
+        server = FMGDAServer(
+            model=model,
+            clients=clients,
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
+        )
+        return FedJDTrainer(server=server, num_rounds=num_rounds)
+
     if method in PHASE5_FORMAL_BASELINES:
         clients = [
             Phase5OfficialBaselineClient(
@@ -87,23 +109,12 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
-    clients = [
-        FedJDClient(
-            client_id=i,
-            dataset=client_datasets[i],
-            batch_size=256,
-            device=device,
-            use_full_loader=True,
-            local_epochs=local_epochs,
-        )
-        for i in range(num_clients)
-    ]
     raise ValueError(f"Unknown Phase 5 method: {method}")
 
 
 def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed,
                    device, num_rounds, num_clients, participation_rate, learning_rate,
-                   model_arch, dataset, data_split, local_epochs=1, fair_comparison=False,
+                   model_arch, dataset, data_split, local_epochs=1,
                    eval_dataset=None):
 
     trainer = build_trainer(
@@ -153,14 +164,6 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "conflict_aware_momentum": False,
         "model_arch": model_arch,
         "total_local_steps": total_local_steps,
-        "total_local_epoch_budget": total_local_steps,
-        "fair_comparison": fair_comparison,
-        "method_display_name": spec.display_name,
-        "method_family": spec.family,
-        "source_paper": spec.paper_title,
-        "source_paper_url": spec.paper_url,
-        "source_official_repo": spec.official_repo,
-        "source_note": spec.implementation_note,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
         "avg_ri": round(avg_ri, 6),
         "avg_upload_bytes": round(avg_upload, 0),
@@ -186,7 +189,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         row[f"task_{i}_f1"] = ""
         row[f"task_{i}_mse"] = ""
 
-    logger.info("[%s] %s: RI=%.4f steps=%d time=%.1fs", exp_id, method, avg_ri, total_local_steps, elapsed)
+    logger.info("[%s] %s (%s): RI=%.4f steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, avg_ri, total_local_steps, elapsed)
     return row
 
 

@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 SEEDS = [7, 42, 123]
-METHODS = ["nfjd", "fedavg_ls", "fedavg_mgda", "fedavg_pcgrad", "fedavg_cagrad"]
+METHODS = ["nfjd", "fmgda", "fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"]
 CELEBA_ROOT = os.environ.get("CELEBA_ROOT", str(Path("data/celeba")))
 
 
@@ -65,7 +65,7 @@ def run_celeba(method, seed, iid=True, num_rounds=50,
         num_rounds=nr, num_clients=num_clients,
         participation_rate=participation_rate, learning_rate=learning_rate,
         model_arch="celeba_cnn", dataset="celeba", data_split=split_name,
-        local_epochs=le, fair_comparison=fair_comparison, eval_dataset=data["val_dataset"],
+        local_epochs=le, eval_dataset=data["val_dataset"],
     )
 
     all_preds, all_targets = evaluate_model(model, data["test_dataset"], device)
@@ -87,7 +87,7 @@ def main():
             experiments.append(dict(method=method, seed=seed, iid=False, num_tasks=4))
 
     for m in [2, 4, 6]:
-        for method in ["nfjd", "fedavg_mgda", "fedavg_cagrad"]:
+        for method in ["nfjd", "fmgda", "fedavg_cagrad"]:
             for seed in SEEDS:
                 experiments.append(dict(method=method, seed=seed, iid=True, num_tasks=m))
 

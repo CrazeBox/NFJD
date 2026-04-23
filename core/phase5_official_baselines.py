@@ -11,8 +11,6 @@ from scipy.optimize import minimize
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from fedjd.aggregators import MinNormAggregator
-
 from .client import ObjectiveFn, _measure_peak_memory
 from .evaluation import evaluate_objectives_on_dataset
 from .nfjd_client import add_flat_update_, flatten_gradients
@@ -49,14 +47,14 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         official_repo="https://github.com/AvivNavon/nash-mtl",
         implementation_note="Federated wrapper with local linear-scalarization updates; local combiner aligned with the official Nash-MTL baseline API.",
     ),
-    "fedavg_mgda": Phase5MethodSpec(
-        method="fedavg_mgda",
-        display_name="FedAvg+MGDA-UB",
-        family="official_baseline",
-        paper_title="Multi-Task Learning as Multi-Objective Optimization (Sener and Koltun, NeurIPS 2018)",
-        paper_url="https://arxiv.org/abs/1810.04650",
-        official_repo="https://github.com/isl-org/MultiObjectiveOptimization",
-        implementation_note="Federated wrapper with local MGDA-UB updates; local min-norm solver aligned with the official MGDA repository.",
+    "fmgda": Phase5MethodSpec(
+        method="fmgda",
+        display_name="FMGDA",
+        family="federated_baseline",
+        paper_title="Federated Multi-Objective Learning (Yang et al., NeurIPS 2023)",
+        paper_url="https://arxiv.org/abs/2310.09866",
+        official_repo="",
+        implementation_note="Server-side FMGDA over aggregated client Jacobians, following the federated multi-objective learning formulation instead of a local FedAvg+MGDA wrapper.",
     ),
     "fedavg_pcgrad": Phase5MethodSpec(
         method="fedavg_pcgrad",
@@ -78,7 +76,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
     ),
 }
 
-PHASE5_FORMAL_BASELINES = ["fedavg_ls", "fedavg_mgda", "fedavg_pcgrad", "fedavg_cagrad"]
+PHASE5_FORMAL_BASELINES = ["fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"]
 
 
 @dataclass
@@ -168,9 +166,6 @@ def combine_multi_task_gradients(method: str, losses: list[torch.Tensor], model:
         return _linear_scalarization_direction(losses, model)
 
     jacobian = _compute_task_jacobian(model, losses)
-    if method == "fedavg_mgda":
-        aggregator = MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
-        return aggregator(jacobian)
     if method == "fedavg_pcgrad":
         return _pcgrad_direction(jacobian, generator)
     if method == "fedavg_cagrad":
