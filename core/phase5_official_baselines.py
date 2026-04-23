@@ -4,16 +4,16 @@ import copy
 import random
 import time
 from dataclasses import dataclass
+from itertools import chain
 
 import numpy as np
 import torch
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .client import ObjectiveFn, _measure_peak_memory
 from .evaluation import evaluate_objectives_on_dataset
-from .nfjd_client import add_flat_update_, flatten_gradients
 from .server import RoundStats, _count_nan_inf, assign_flat_parameters, flatten_parameters
 
 
@@ -45,7 +45,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         paper_title="Linear Scalarization baseline (official Nash-MTL codebase API)",
         paper_url="https://github.com/AvivNavon/nash-mtl",
         official_repo="https://github.com/AvivNavon/nash-mtl",
-        implementation_note="Federated wrapper with local linear-scalarization updates; local combiner aligned with the official Nash-MTL baseline API.",
+        implementation_note="Federated wrapper with local sum-loss updates; local scalarization follows the official Nash-MTL LS baseline without 1/m normalization.",
     ),
     "fmgda": Phase5MethodSpec(
         method="fmgda",
@@ -63,7 +63,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         paper_title="Gradient Surgery for Multi-Task Learning (Yu et al., ICLR 2020)",
         paper_url="https://arxiv.org/abs/2001.06782",
         official_repo="https://github.com/tianheyu927/PCGrad",
-        implementation_note="Federated wrapper with local PCGrad updates; local projection rule aligned with the official PCGrad repository.",
+        implementation_note="Federated wrapper with local PCGrad updates on shared parameters only; task-specific heads follow the summed task loss, matching the official multitask usage pattern.",
     ),
     "fedavg_cagrad": Phase5MethodSpec(
         method="fedavg_cagrad",
@@ -72,7 +72,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         paper_title="Conflict-Averse Gradient Descent for Multi-task Learning (Liu et al., NeurIPS 2021)",
         paper_url="https://arxiv.org/abs/2110.14048",
         official_repo="https://github.com/Cranial-XIX/CAGrad",
-        implementation_note="Federated wrapper with local CAGrad updates; local dual objective follows the official CAGrad formulation.",
+        implementation_note="Federated wrapper with local CAGrad updates on shared parameters only; the dual is solved in task space with the official rescaling convention and summed-loss head updates.",
     ),
 }
 
@@ -95,23 +95,70 @@ def get_phase5_method_spec(method: str) -> Phase5MethodSpec:
     return PHASE5_METHOD_SPECS[method]
 
 
-def _compute_task_jacobian(model: nn.Module, losses: list[torch.Tensor]) -> torch.Tensor:
-    rows = []
-    for idx, objective in enumerate(losses):
-        model.zero_grad(set_to_none=True)
-        objective.backward(retain_graph=idx < len(losses) - 1)
-        rows.append(flatten_gradients(model.parameters()))
-    model.zero_grad(set_to_none=True)
-    return torch.stack(rows, dim=0)
+def _unique_parameters(modules: list[nn.Module]) -> list[nn.Parameter]:
+    params: list[nn.Parameter] = []
+    seen: set[int] = set()
+    for module in modules:
+        for param in module.parameters():
+            if id(param) not in seen:
+                params.append(param)
+                seen.add(id(param))
+    return params
 
 
-def _linear_scalarization_direction(losses: list[torch.Tensor], model: nn.Module) -> torch.Tensor:
-    model.zero_grad(set_to_none=True)
-    total_loss = sum(losses) / max(len(losses), 1)
-    total_loss.backward()
-    direction = flatten_gradients(model.parameters())
-    model.zero_grad(set_to_none=True)
-    return direction
+def _get_model_parameter_groups(model: nn.Module) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+    shared_modules: list[nn.Module] = []
+    for attr in ("shared", "fc_shared", "features", "shared_fc"):
+        module = getattr(model, attr, None)
+        if isinstance(module, nn.Module):
+            shared_modules.append(module)
+
+    head_modules = getattr(model, "heads", None)
+    shared_params = _unique_parameters(shared_modules)
+    head_params: list[nn.Parameter] = []
+    if isinstance(head_modules, nn.ModuleList):
+        head_params = _unique_parameters(list(head_modules))
+
+    known_ids = {id(param) for param in chain(shared_params, head_params)}
+    leftover = [param for param in model.parameters() if id(param) not in known_ids]
+    if leftover:
+        shared_params.extend(leftover)
+    if not shared_params:
+        shared_params = list(model.parameters())
+
+    return shared_params, head_params
+
+
+def _flatten_gradient_list(grads: tuple[torch.Tensor | None, ...], params: list[nn.Parameter]) -> torch.Tensor:
+    if not params:
+        return torch.zeros(0, dtype=torch.float32)
+    chunks = []
+    for grad, param in zip(grads, params):
+        if grad is None:
+            chunks.append(torch.zeros_like(param).reshape(-1))
+        else:
+            chunks.append(grad.detach().reshape(-1))
+    return torch.cat(chunks)
+
+
+def _apply_gradients(params: list[nn.Parameter], grads: tuple[torch.Tensor | None, ...], learning_rate: float) -> None:
+    if not params:
+        return
+    with torch.no_grad():
+        for param, grad in zip(params, grads):
+            if grad is not None:
+                param.add_(grad, alpha=-learning_rate)
+
+
+def _apply_flat_direction(params: list[nn.Parameter], direction: torch.Tensor, learning_rate: float) -> None:
+    if not params:
+        return
+    offset = 0
+    with torch.no_grad():
+        for param in params:
+            size = param.numel()
+            param.add_(direction[offset:offset + size].view_as(param), alpha=-learning_rate)
+            offset += size
 
 
 def _pcgrad_direction(jacobian: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
@@ -131,46 +178,55 @@ def _pcgrad_direction(jacobian: torch.Tensor, generator: torch.Generator) -> tor
             if dot < 0.0:
                 mixed = mixed - (dot / denom) * reference
         projected.append(mixed)
-    return torch.stack(projected, dim=0).mean(dim=0)
+    return torch.stack(projected, dim=0).sum(dim=0)
 
 
-def _cagrad_direction(jacobian: torch.Tensor, c: float = 0.5) -> torch.Tensor:
+def _cagrad_direction(jacobian: torch.Tensor, c: float = 0.4) -> torch.Tensor:
     if jacobian.shape[0] == 1:
         return jacobian[0]
 
-    jac_cpu = jacobian.detach().cpu().double().numpy()
-    g0 = jacobian.mean(dim=0)
-    g0_cpu = g0.detach().cpu().double().numpy()
-    g0_norm = float(np.linalg.norm(g0_cpu))
     m = jacobian.shape[0]
+    gram = (jacobian @ jacobian.T).detach().cpu().double().numpy()
+    alpha = np.full(m, 1.0 / m, dtype=np.float64)
+    g0_norm = float(np.sqrt(alpha @ gram @ alpha + 1e-8))
+    coef = c * g0_norm
 
     def objective(weights: np.ndarray) -> float:
-        gw = np.sum(jac_cpu * weights[:, None], axis=0)
-        return float(np.dot(g0_cpu, gw) + c * g0_norm * np.linalg.norm(gw))
+        quad = float(weights @ gram @ weights)
+        coupling = float(alpha @ gram @ weights)
+        return coupling + coef * np.sqrt(max(quad, 1e-8))
 
-    x0 = np.full(m, 1.0 / m, dtype=np.float64)
-    bounds = [(0.0, 1.0)] * m
-    constraints = ({"type": "eq", "fun": lambda weights: float(np.sum(weights) - 1.0)},)
-    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints, options={"maxiter": 100, "ftol": 1e-12})
-    weights = result.x if result.success else x0
+    if m == 2:
+        result = minimize_scalar(lambda x: objective(np.array([x, 1.0 - x], dtype=np.float64)), bounds=(0.0, 1.0), method="bounded")
+        weights = np.array([result.x, 1.0 - result.x], dtype=np.float64) if result.success else alpha
+    else:
+        bounds = [(0.0, 1.0)] * m
+        constraints = ({"type": "eq", "fun": lambda weights: float(np.sum(weights) - 1.0)},)
+        result = minimize(objective, alpha, method="SLSQP", bounds=bounds, constraints=constraints, options={"maxiter": 100, "ftol": 1e-12})
+        weights = result.x if result.success else alpha
 
     weights_t = torch.tensor(weights, dtype=jacobian.dtype, device=jacobian.device)
+    g0 = jacobian.T @ torch.full((m,), 1.0 / m, dtype=jacobian.dtype, device=jacobian.device)
     gw = jacobian.T @ weights_t
     gw_norm = torch.norm(gw, p=2).item()
     lam = c * g0_norm / max(gw_norm, 1e-12)
-    return (g0 + lam * gw) / (1.0 + c)
+    return (g0 + lam * gw) / (1.0 + c * c)
 
 
-def combine_multi_task_gradients(method: str, losses: list[torch.Tensor], model: nn.Module, generator: torch.Generator) -> torch.Tensor:
-    if method == "fedavg_ls":
-        return _linear_scalarization_direction(losses, model)
-
-    jacobian = _compute_task_jacobian(model, losses)
-    if method == "fedavg_pcgrad":
-        return _pcgrad_direction(jacobian, generator)
-    if method == "fedavg_cagrad":
-        return _cagrad_direction(jacobian)
-    raise ValueError(f"Unsupported official baseline method: {method}")
+def _compute_shared_task_jacobian(
+    losses: list[torch.Tensor],
+    shared_params: list[nn.Parameter],
+) -> torch.Tensor:
+    rows = []
+    for task_idx, objective in enumerate(losses):
+        grads = torch.autograd.grad(
+            objective,
+            shared_params,
+            retain_graph=task_idx < len(losses) - 1,
+            allow_unused=True,
+        )
+        rows.append(_flatten_gradient_list(grads, shared_params))
+    return torch.stack(rows, dim=0)
 
 
 class Phase5OfficialBaselineClient:
@@ -202,6 +258,7 @@ class Phase5OfficialBaselineClient:
         start = time.time()
         theta_init = flatten_parameters(model.parameters()).clone()
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+        shared_params, head_params = _get_model_parameter_groups(model)
 
         for _ in range(self.local_epochs):
             for batch_inputs, batch_targets in loader:
@@ -209,8 +266,28 @@ class Phase5OfficialBaselineClient:
                 batch_targets = batch_targets.to(self.device)
                 predictions = model(batch_inputs)
                 losses = objective_fn(predictions, batch_targets, batch_inputs)
-                direction = combine_multi_task_gradients(self.method, losses, model, self.generator)
-                add_flat_update_(model.parameters(), direction, alpha=-self.learning_rate)
+                total_loss = sum(losses)
+
+                if self.method == "fedavg_ls":
+                    all_params = list(model.parameters())
+                    grads = torch.autograd.grad(total_loss, all_params, allow_unused=True)
+                    _apply_gradients(all_params, grads, self.learning_rate)
+                    continue
+
+                head_grads: tuple[torch.Tensor | None, ...] = tuple()
+                if head_params:
+                    head_grads = torch.autograd.grad(total_loss, head_params, retain_graph=True, allow_unused=True)
+
+                jacobian = _compute_shared_task_jacobian(losses, shared_params)
+                if self.method == "fedavg_pcgrad":
+                    shared_direction = _pcgrad_direction(jacobian, self.generator)
+                elif self.method == "fedavg_cagrad":
+                    shared_direction = jacobian.shape[0] * _cagrad_direction(jacobian)
+                else:
+                    raise ValueError(f"Unsupported official baseline method: {self.method}")
+
+                _apply_flat_direction(shared_params, shared_direction, self.learning_rate)
+                _apply_gradients(head_params, head_grads, self.learning_rate)
 
         delta_theta = flatten_parameters(model.parameters()) - theta_init
         compute_time = time.time() - start
@@ -358,6 +435,5 @@ __all__ = [
     "Phase5MethodSpec",
     "Phase5OfficialBaselineClient",
     "Phase5OfficialBaselineServer",
-    "combine_multi_task_gradients",
     "get_phase5_method_spec",
 ]

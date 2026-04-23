@@ -29,16 +29,16 @@ class CelebaCNN(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
         
-        # Fully connected layers
-        self.classifier = nn.Sequential(
+        self.shared_fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(256 * 4 * 4, 512),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(512, num_attributes),
         )
+        self.heads = nn.ModuleList([nn.Linear(512, 1) for _ in range(num_attributes)])
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
-        x = self.classifier(x)
-        return x
+        shared = self.shared_fc(x)
+        logits = [head(shared) for head in self.heads]
+        return torch.cat(logits, dim=1)

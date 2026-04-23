@@ -200,8 +200,9 @@ class FMGDAServer:
         max_client_mem = 0.0
         per_client_upload = 0
         aggregated_updates = None
-        aggregated_counts = None
+        aggregated_weights = None
         local_steps = 1
+        total_examples = sum(client.num_examples for client in sampled)
 
         for client in sampled:
             result = client.compute_objective_updates(
@@ -209,9 +210,10 @@ class FMGDAServer:
                 self.objective_fn,
                 num_objectives=num_objectives,
             )
+            client_weight = result.num_examples / max(total_examples, 1)
             if aggregated_updates is None:
                 aggregated_updates = torch.zeros_like(result.objective_updates)
-                aggregated_counts = torch.zeros(
+                aggregated_weights = torch.zeros(
                     result.objective_updates.shape[0],
                     dtype=result.objective_updates.dtype,
                     device=self.device,
@@ -219,8 +221,8 @@ class FMGDAServer:
                 local_steps = getattr(client, "local_epochs", 1)
             mask_indices = torch.nonzero(result.objective_mask.to(self.device), as_tuple=False).flatten()
             if mask_indices.numel() > 0:
-                aggregated_updates[mask_indices] += result.objective_updates[mask_indices].to(self.device)
-                aggregated_counts[mask_indices] += 1.0
+                aggregated_updates[mask_indices] += client_weight * result.objective_updates[mask_indices].to(self.device)
+                aggregated_weights[mask_indices] += client_weight
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
             total_nan_inf += _count_nan_inf(result.objective_updates)
@@ -233,15 +235,15 @@ class FMGDAServer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        if aggregated_updates is None or aggregated_counts is None:
+        if aggregated_updates is None or aggregated_weights is None:
             raise RuntimeError("No client contributed FMGDA objective updates.")
 
-        active_mask = aggregated_counts > 0
+        active_mask = aggregated_weights > 0
         if not active_mask.any():
             raise RuntimeError("No objectives available after FMGDA client aggregation.")
 
         dir_start = time.time()
-        aggregated = aggregated_updates[active_mask] / aggregated_counts[active_mask].unsqueeze(1)
+        aggregated = aggregated_updates[active_mask] / aggregated_weights[active_mask].unsqueeze(1)
         if self.aggregator is not None:
             direction = self.aggregator(aggregated)
         else:

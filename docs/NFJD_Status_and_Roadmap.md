@@ -49,9 +49,11 @@ The following changes are already reflected in the code and should be treated as
 - Added `run_phase5_suite.py` as the canonical Phase 5 entrypoint
 - Bound the main Phase 5 baselines to:
   - `FedAvg+LS`
-  - `FedAvg+MGDA-UB`
+  - `FMGDA`
   - `FedAvg+PCGrad`
   - `FedAvg+CAGrad`
+- Replaced the earlier Phase 5 `FedAvg+MGDA-UB` placeholder with a paper-aligned `FMGDA` implementation that uses per-objective local trajectories on clients and server-side MGDA aggregation
+- Tightened Phase 5 baseline fidelity so that `LS / PCGrad / CAGrad / FMGDA` better match their official paper/repo formulations, including shared-parameter surgery for `PCGrad/CAGrad` and sample-weighted server aggregation for `FMGDA`
 
 ## Recommended Current Entry Points
 
@@ -117,6 +119,17 @@ These are the highest-value next steps, ordered by importance.
 4. Add sensitivity analysis for alignment adjustment strength
 5. Add stronger statistical reporting for Phase 5 summaries
 6. Decide whether to keep or archive older benchmark scripts that still assume pre-UPGrad NFJD semantics
+
+## Phase 5 Post-Run Follow-Ups
+
+These items should be handled after the current Phase 5 program finishes running. They are intentionally separated from the live experiment run so the current jobs remain stable.
+
+1. Run a small hyperparameter sweep for `FMGDA`, `FedAvg+LS`, `FedAvg+PCGrad`, and `FedAvg+CAGrad` instead of relying on a single shared learning rate
+2. For `FMGDA`, test whether separating local step size `eta_L` and server step size `eta_t` changes the ranking or stability
+3. Report Phase 5 main-table results as `mean ± std` over seeds, not only raw per-seed rows
+4. Add statistical tests for the final Phase 5 summary tables, preferably Wilcoxon for pairwise comparisons and Friedman/Nemenyi for overall ranking
+5. Keep manuscript wording precise: treat `FMGDA` as a native federated multi-objective baseline, and treat `FedAvg+LS / PCGrad / CAGrad` as federated adaptations of centralized multi-task optimizers
+6. Re-check Phase 5 compute and communication tables after the runs finish so that wall-clock and upload claims are reported conservatively
 
 ## Not Recommended Right Now
 
