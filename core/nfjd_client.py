@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from itertools import chain
 from typing import Callable
 
 import torch
@@ -42,6 +43,72 @@ def add_flat_update_(parameters, flat_update: torch.Tensor, alpha: float = 1.0) 
         size = parameter.numel()
         parameter.data.add_(flat_update[offset:offset + size].view_as(parameter), alpha=alpha)
         offset += size
+
+
+def _unique_parameters(modules: list[nn.Module]) -> list[nn.Parameter]:
+    params: list[nn.Parameter] = []
+    seen: set[int] = set()
+    for module in modules:
+        for param in module.parameters():
+            if id(param) not in seen:
+                params.append(param)
+                seen.add(id(param))
+    return params
+
+
+def get_model_parameter_groups(model: nn.Module) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+    shared_modules: list[nn.Module] = []
+    for attr in ("shared", "fc_shared", "features", "shared_fc"):
+        module = getattr(model, attr, None)
+        if isinstance(module, nn.Module):
+            shared_modules.append(module)
+
+    head_modules = getattr(model, "heads", None)
+    shared_params = _unique_parameters(shared_modules)
+    head_params: list[nn.Parameter] = []
+    if isinstance(head_modules, nn.ModuleList):
+        head_params = _unique_parameters(list(head_modules))
+
+    known_ids = {id(param) for param in chain(shared_params, head_params)}
+    leftover = [param for param in model.parameters() if id(param) not in known_ids]
+    if leftover:
+        shared_params.extend(leftover)
+    if not shared_params:
+        shared_params = list(model.parameters())
+
+    return shared_params, head_params
+
+
+def _flatten_gradient_list(grads: tuple[torch.Tensor | None, ...], params: list[nn.Parameter]) -> torch.Tensor:
+    if not params:
+        return torch.zeros(0, dtype=torch.float32)
+    chunks = []
+    for grad, param in zip(grads, params):
+        if grad is None:
+            chunks.append(torch.zeros_like(param).reshape(-1))
+        else:
+            chunks.append(grad.detach().reshape(-1))
+    return torch.cat(chunks)
+
+
+def _apply_gradients(params: list[nn.Parameter], grads: tuple[torch.Tensor | None, ...], learning_rate: float) -> None:
+    if not params:
+        return
+    with torch.no_grad():
+        for param, grad in zip(params, grads):
+            if grad is not None:
+                param.add_(grad, alpha=-learning_rate)
+
+
+def _apply_flat_direction(params: list[nn.Parameter], direction: torch.Tensor, learning_rate: float) -> None:
+    if not params:
+        return
+    offset = 0
+    with torch.no_grad():
+        for param in params:
+            size = param.numel()
+            param.add_(direction[offset:offset + size].view_as(param), alpha=-learning_rate)
+            offset += size
 
 
 @dataclass
@@ -166,6 +233,8 @@ class NFJDClient:
         cosine_history: list[float] = []
         last_avg_cosine_sim = 0.0
         last_raw_jacobian = None
+        shared_params, head_params = get_model_parameter_groups(model)
+        theta_init_shared = flatten_parameters(shared_params).clone()
 
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -177,6 +246,7 @@ class NFJDClient:
                 with torch.amp.autocast("cuda", enabled=self.use_mixed_precision):
                     predictions = model(batch_inputs)
                     losses = objective_fn(predictions, batch_targets, batch_inputs)
+                total_loss = sum(losses)
                 if m is None:
                     m = len(losses)
                     dynamic_iters = self._compute_dynamic_iters(m)
@@ -200,15 +270,21 @@ class NFJDClient:
                         sampled_indices = list(range(m))
                         objective_indices = sampled_indices
 
+                    head_grads: tuple[torch.Tensor | None, ...] = tuple()
+                    if head_params:
+                        head_grads = torch.autograd.grad(total_loss, head_params, retain_graph=True, allow_unused=True)
+
                     independent_grads = []
                     for grad_pos, objective_idx in enumerate(objective_indices):
-                        model.zero_grad(set_to_none=True)
-                        retain = grad_pos < len(objective_indices) - 1
-                        losses[objective_idx].backward(retain_graph=retain)
-                        independent_grads.append(flatten_gradients(model.parameters()))
+                        grads = torch.autograd.grad(
+                            losses[objective_idx],
+                            shared_params,
+                            retain_graph=grad_pos < len(objective_indices) - 1 or bool(head_params),
+                            allow_unused=True,
+                        )
+                        independent_grads.append(_flatten_gradient_list(grads, shared_params))
 
                     jacobian = torch.stack(independent_grads, dim=0)
-                    model.zero_grad(set_to_none=True)
                     last_raw_jacobian = jacobian.detach().clone()
                     jacobian = self._normalize_jacobian(jacobian)
 
@@ -238,10 +314,9 @@ class NFJDClient:
                     if self.prev_lambda is not None:
                         lam = self.prev_lambda.detach()
                         L_total = sum(lam[i] * losses[i] for i in range(m))
-                        model.zero_grad(set_to_none=True)
-                        L_total.backward()
-                        direction = flatten_gradients(model.parameters())
-                        model.zero_grad(set_to_none=True)
+                        shared_grads = torch.autograd.grad(L_total, shared_params, retain_graph=bool(head_params), allow_unused=True)
+                        direction = _flatten_gradient_list(shared_grads, shared_params)
+                        head_grads = torch.autograd.grad(total_loss, head_params, allow_unused=True) if head_params else tuple()
                         if self.adaptive_rescaling is not None:
                             direction = direction * last_rescale_factor
                         rescale_factor = last_rescale_factor
@@ -253,15 +328,18 @@ class NFJDClient:
                             sampled_indices = list(range(m))
                             objective_indices = sampled_indices
 
+                        head_grads = torch.autograd.grad(total_loss, head_params, retain_graph=True, allow_unused=True) if head_params else tuple()
                         independent_grads = []
                         for grad_pos, objective_idx in enumerate(objective_indices):
-                            model.zero_grad(set_to_none=True)
-                            retain = grad_pos < len(objective_indices) - 1
-                            losses[objective_idx].backward(retain_graph=retain)
-                            independent_grads.append(flatten_gradients(model.parameters()))
+                            grads = torch.autograd.grad(
+                                losses[objective_idx],
+                                shared_params,
+                                retain_graph=grad_pos < len(objective_indices) - 1 or bool(head_params),
+                                allow_unused=True,
+                            )
+                            independent_grads.append(_flatten_gradient_list(grads, shared_params))
 
                         jacobian = torch.stack(independent_grads, dim=0)
-                        model.zero_grad(set_to_none=True)
                         last_raw_jacobian = jacobian.detach().clone()
                         jacobian = self._normalize_jacobian(jacobian)
 
@@ -287,19 +365,21 @@ class NFJDClient:
 
                 rescale_history.append(last_rescale_factor)
                 cosine_history.append(last_avg_cosine_sim)
-                add_flat_update_(model.parameters(), momentum_direction, alpha=-self.learning_rate)
+                _apply_flat_direction(shared_params, momentum_direction, self.learning_rate)
+                _apply_gradients(head_params, head_grads, self.learning_rate)
                 if final_lambda is not None:
                     self.prev_lambda = final_lambda.detach().clone()
                 step_idx += 1
 
         theta_final = flatten_parameters(model.parameters())
         delta_theta = theta_final - theta_init
+        shared_delta_theta = flatten_parameters(shared_params) - theta_init_shared
         compute_time = time.time() - start
 
         align_scores = None
         if self.upload_align_scores and last_raw_jacobian is not None:
             # Positive alignment means the local update is predicted to reduce the objective.
-            align_scores = -(last_raw_jacobian @ delta_theta)
+            align_scores = -(last_raw_jacobian @ shared_delta_theta)
 
         avg_rescale_factor = sum(rescale_history) / len(rescale_history) if rescale_history else last_rescale_factor
         avg_cosine_sim = sum(cosine_history) / len(cosine_history) if cosine_history else last_avg_cosine_sim

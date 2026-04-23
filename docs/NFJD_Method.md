@@ -44,22 +44,37 @@ NFJDServer:
 NFJDClient:
   对每个本地 epoch:
     对每个 mini-batch:
-      计算各目标梯度
-      对各目标梯度做 norm normalization
-      用 UPGrad 求公共方向
-      参数更新: θ = θ - lr * direction
+      拆分参数为 shared params 与 task-head params
+      只在 shared params 上计算各目标梯度
+      对 shared Jacobian 做 norm normalization
+      用 UPGrad 求 shared 公共方向
+      shared params: θ_s = θ_s - lr * direction
+      head params: θ_h = θ_h - lr * grad(sum(loss_i))
   上传: Δθ
 ```
 
 ### 2.2 客户端侧：Exact Local UPGrad
 
 每个客户端在本地执行E轮多目标优化训练：
-- 每个 mini-batch 都显式计算完整 task Jacobian
-- 使用高精度 Gramian-space UPGrad 对偶QP求共同下降方向
-- 直接用该方向更新本地参数
+- 每个 mini-batch 都显式计算 shared trunk 上的 task Jacobian
+- 使用高精度 Gramian-space UPGrad 对偶QP求 shared 公共下降方向
+- task-specific heads 不参加共同方向求解，而是按总损失做普通梯度更新
 - 最终仅上传 Δθ
 
 当前主线在小规模任务数（Phase 5 的 `m<=8`）下优先使用精确 active-set 枚举来求解 UPGrad 子问题，避免因为廉价近似求解器导致本地多目标方向偏弱。
+
+### 2.2.1 Shared Params 与 Head Params
+
+对于当前 Phase 5 的多头模型，参数分为两类：
+
+- `shared params`：所有任务共享的表示层参数
+  - MultiMNIST: `shared + fc_shared`
+  - RiverFlow: `shared`
+  - CelebA: `features + shared_fc`
+- `head params`：每个任务私有的输出头参数
+  - `heads[i]`
+
+NFJD 现在只在 `shared params` 上执行 UPGrad，因为跨任务冲突主要发生在共享表示层；私有 head 本来就只服务各自任务，不应被强行耦合到共同方向里。
 
 ### 2.3 Objective Normalization
 

@@ -11,6 +11,7 @@ As of the current codebase state, the intended mainline definition of NFJD is:
 - Local multi-objective core: `UPGrad`-based Jacobian descent on each client
 - Local solver mode: exact UPGrad recomputation on every local batch
 - Objective scaling: per-objective gradient normalization before the UPGrad solve
+- Parameter scope: apply UPGrad on shared model parameters only, while task heads use standard local gradients
 - Server communication: upload `delta_theta` only in the mainline path
 - Server aggregation: plain sample-weighted FedAvg on uploaded `delta_theta`
 - Held-out tracking: validation set for round-by-round objective tracking, test set for final task metrics
