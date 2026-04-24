@@ -11,6 +11,7 @@ As of the current codebase state, the intended mainline definition of NFJD is:
 - Local multi-objective core: `UPGrad`-based Jacobian descent on each client
 - Local solver mode: exact UPGrad recomputation on every local batch
 - Objective scaling: per-objective gradient normalization before the UPGrad solve
+- Global correction: server broadcasts task-progress weights derived from validation objective improvement
 - Parameter scope: apply UPGrad on shared model parameters only, while task heads use standard local gradients
 - Server communication: upload `delta_theta` only in the mainline path
 - Server aggregation: plain sample-weighted FedAvg on uploaded `delta_theta`
@@ -44,6 +45,7 @@ The following changes are already reflected in the code and should be treated as
 - Switched stale local reuse from simplex-style `lambda` semantics to UPGrad-derived weight reuse
 - Added exact-UPGrad and objective-normalization switches so the mainline can run without reuse, momentum, adaptive rescaling, or stochastic sampling
 - Upgraded the exact-UPGrad mainline to prefer a high-precision active-set box-QP solve for small `m`, with PGD retained only as a fallback path
+- Added global task-progress weighting: the server computes an `m`-dimensional task weight vector from validation relative improvement and broadcasts it to clients; clients use it for shared-UPGrad inputs and task-head losses
 
 ### Evaluation and Fairness
 
@@ -101,11 +103,20 @@ The mainline now uses exact local UPGrad. The open question has flipped: we shou
 
 The current mainline uses EMA gradient-norm normalization. It is still worth comparing this against loss-based normalization or no normalization on selected tasks.
 
-### 3. Optional Server Heuristics
+### 3. Global Progress Weighting
+
+The current mainline now uses lightweight server-to-client task weights. Open questions:
+
+- best `progress_beta` value
+- whether weight clipping `[0.5, 2.0]` is too conservative or too aggressive
+- whether weights should be based on validation RI, training RI, or smoothed validation RI
+- whether task-head losses and shared gradients should use the same weight vector
+
+### 4. Optional Server Heuristics
 
 Alignment-aware weighting and global momentum remain available but are now explicitly optional. They should only come back into the mainline if they beat plain FedAvg on top of the exact local UPGrad backbone.
 
-### 4. Full Gramian Reverse Accumulation
+### 5. Full Gramian Reverse Accumulation
 
 The JD paper outlines a deeper Gramian-based implementation path that avoids explicit Jacobian storage. This is not yet integrated into the current PyTorch training stack.
 
@@ -113,11 +124,12 @@ The JD paper outlines a deeper Gramian-based implementation path that avoids exp
 
 These are the highest-value next steps, ordered by importance.
 
-1. Run the new exact-UPGrad + objective-normalization backbone on Phase 5 and inspect whether it closes the gap to `PCGrad/CAGrad`
-2. Compare exact vs approximate local UPGrad only after the new backbone has clean results
-3. Re-introduce optional modules one by one: adaptive rescaling, local momentum, global momentum, alignment-aware weighting, stochastic Gramian
-4. Add stronger statistical reporting for Phase 5 summaries
-5. Decide whether to keep or archive older benchmark scripts that still assume the pre-backbone NFJD semantics
+1. Re-run MultiMNIST Non-IID with global-progress-aware NFJD and check whether task 0 accuracy/F1 and `all_decreased` improve
+2. Sweep `progress_beta` and weight clipping on MultiMNIST Non-IID before running the full Phase 5 suite
+3. Compare exact vs approximate local UPGrad only after the global-progress-aware backbone has clean results
+4. Re-introduce optional modules one by one: adaptive rescaling, local momentum, global momentum, alignment-aware weighting, stochastic Gramian
+5. Add stronger statistical reporting for Phase 5 summaries
+6. Decide whether to keep or archive older benchmark scripts that still assume the pre-backbone NFJD semantics
 
 ## Phase 5 Post-Run Follow-Ups
 
@@ -129,6 +141,7 @@ These items should be handled after the current Phase 5 program finishes running
 4. Add statistical tests for the final Phase 5 summary tables, preferably Wilcoxon for pairwise comparisons and Friedman/Nemenyi for overall ranking
 5. Keep manuscript wording precise: treat `FMGDA` as a native federated multi-objective baseline, and treat `FedAvg+LS / PCGrad / CAGrad` as federated adaptations of centralized multi-task optimizers
 6. Re-check Phase 5 compute and communication tables after the runs finish so that wall-clock and upload claims are reported conservatively
+7. For NFJD, report `avg_task_weight_gap` to show how strongly global progress feedback was used
 
 ## Not Recommended Right Now
 
@@ -146,6 +159,7 @@ Suggested tags:
 
 - `nfjd-upgrad-mainline`
 - `nfjd-upgrad-exact-fgavg`
+- `nfjd-gp-shared-upgrad`
 - `nfjd-upgrad-exact-ref`
 - `nfjd-server-no-momentum`
 - `nfjd-server-no-align`

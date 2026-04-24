@@ -36,7 +36,7 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         paper_title="NFJD (this repository)",
         paper_url="",
         official_repo="",
-        implementation_note="Current mainline NFJD uses exact local UPGrad with objective normalization, uploads delta_theta only, and aggregates with plain sample-weighted FedAvg.",
+        implementation_note="Current mainline NFJD uses global-progress-aware exact local UPGrad on shared parameters, objective normalization, delta_theta-only upload, and sample-weighted FedAvg aggregation.",
     ),
     "fedavg_ls": Phase5MethodSpec(
         method="fedavg_ls",

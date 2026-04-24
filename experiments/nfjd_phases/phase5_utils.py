@@ -26,11 +26,13 @@ ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "data_split", "m", "seed", "num_rounds",
     "num_clients", "participation_rate", "learning_rate", "local_epochs",
     "use_adaptive_rescaling", "use_stochastic_gramian", "conflict_aware_momentum",
-    "use_objective_normalization", "exact_upgrad",
+    "use_objective_normalization", "exact_upgrad", "use_global_progress_weights",
+    "progress_beta", "progress_min_weight", "progress_max_weight",
     "model_arch", "total_local_steps",
     "elapsed_time", "all_decreased", "avg_ri",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
     "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
+    "avg_task_weight_gap",
     "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
     "avg_mse", "max_mse", "mse_std",
 ]
@@ -63,6 +65,10 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             device=device, global_momentum_beta=0.0,
             conflict_aware_momentum=False, momentum_min_beta=0.1,
             parallel_clients=False, eval_dataset=eval_dataset,
+            use_global_progress_weights=True,
+            progress_beta=2.0,
+            progress_min_weight=0.5,
+            progress_max_weight=2.0,
         )
         return NFJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -148,6 +154,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
     avg_rescale = 1.0
     avg_cosine_sim = 0.0
     avg_effective_beta = 0.9
+    avg_task_weight_gap = 0.0
     if method == "nfjd":
         rescale_vals = [s.avg_rescale_factor for s in history]
         avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
@@ -155,6 +162,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         avg_cosine_sim = sum(cosine_vals) / len(cosine_vals) if cosine_vals else 0.0
         beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
         avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
+        weight_gap_vals = [getattr(s, "task_weight_gap", 0.0) for s in history]
+        avg_task_weight_gap = sum(weight_gap_vals) / len(weight_gap_vals) if weight_gap_vals else 0.0
 
     total_local_steps = local_epochs * sum(max(int(getattr(s, "num_sampled_clients", 0)), 0) for s in history)
     spec = get_phase5_method_spec(method)
@@ -170,6 +179,10 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "conflict_aware_momentum": False,
         "use_objective_normalization": method == "nfjd",
         "exact_upgrad": method == "nfjd",
+        "use_global_progress_weights": method == "nfjd",
+        "progress_beta": 2.0 if method == "nfjd" else "",
+        "progress_min_weight": 0.5 if method == "nfjd" else "",
+        "progress_max_weight": 2.0 if method == "nfjd" else "",
         "model_arch": model_arch,
         "total_local_steps": total_local_steps,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
@@ -180,6 +193,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine_sim, 4),
         "avg_effective_beta": round(avg_effective_beta, 4),
+        "avg_task_weight_gap": round(avg_task_weight_gap, 4),
         "avg_accuracy": "", "avg_f1": "", "task_jfi": "", "task_mmag": "",
         "avg_mse": "", "max_mse": "", "mse_std": "",
     }

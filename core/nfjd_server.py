@@ -35,6 +35,8 @@ class RoundStats:
     avg_local_epochs: int = 0
     avg_cosine_sim: float = 0.0
     effective_global_beta: float = 0.9
+    task_weights: list[float] = field(default_factory=list)
+    task_weight_gap: float = 0.0
     method_name: str = "nfjd"
 
 
@@ -52,6 +54,10 @@ class NFJDServer:
         momentum_min_beta: float = 0.1,
         parallel_clients: bool | None = None,
         eval_dataset=None,
+        use_global_progress_weights: bool = False,
+        progress_beta: float = 2.0,
+        progress_min_weight: float = 0.5,
+        progress_max_weight: float = 2.0,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -67,6 +73,43 @@ class NFJDServer:
         self.conflict_aware_momentum = conflict_aware_momentum
         self.parallel_clients = device.type != "cuda" if parallel_clients is None else parallel_clients
         self.eval_dataset = eval_dataset
+        self.use_global_progress_weights = use_global_progress_weights
+        self.progress_beta = progress_beta
+        self.progress_min_weight = progress_min_weight
+        self.progress_max_weight = progress_max_weight
+        self.initial_objectives: list[float] | None = None
+        self.previous_objectives: list[float] | None = None
+        self.task_weights: torch.Tensor | None = None
+
+    def set_initial_objectives(self, objectives: list[float]) -> None:
+        self.initial_objectives = list(objectives)
+        self.previous_objectives = list(objectives)
+        self.task_weights = torch.ones(len(objectives), dtype=torch.float32, device=self.device)
+
+    def _compute_task_weights(self) -> torch.Tensor:
+        if not self.use_global_progress_weights:
+            if self.task_weights is not None:
+                return self.task_weights
+            objectives = self.previous_objectives or self.evaluate_global_objectives()
+            self.task_weights = torch.ones(len(objectives), dtype=torch.float32, device=self.device)
+            return self.task_weights
+
+        if self.initial_objectives is None:
+            current = self.evaluate_global_objectives()
+            self.set_initial_objectives(current)
+
+        if self.previous_objectives is None:
+            self.previous_objectives = list(self.initial_objectives)
+
+        init = torch.tensor(self.initial_objectives, dtype=torch.float32, device=self.device)
+        current = torch.tensor(self.previous_objectives, dtype=torch.float32, device=self.device)
+        ri = (init - current) / torch.clamp(torch.abs(init), min=1e-8)
+        deficit = torch.mean(ri) - ri
+        weights = torch.exp(self.progress_beta * deficit)
+        weights = torch.clamp(weights, min=self.progress_min_weight, max=self.progress_max_weight)
+        weights = weights / torch.clamp(torch.mean(weights), min=1e-8)
+        self.task_weights = weights.detach()
+        return self.task_weights
 
     def sample_clients(self) -> list[NFJDClient]:
         sample_size = max(int(len(self.clients) * self.participation_rate), 1)
@@ -118,6 +161,7 @@ class NFJDServer:
         round_start = time.time()
         sampled_clients = self.sample_clients()
         total_examples = sum(client.num_examples for client in sampled_clients)
+        task_weights = self._compute_task_weights()
 
         client_start = time.time()
         delta_thetas = []
@@ -129,7 +173,7 @@ class NFJDServer:
 
         def _run_single_client(client):
             model_clone = self._clone_model()
-            return client.local_update(model_clone, self.objective_fn)
+            return client.local_update(model_clone, self.objective_fn, task_weights=task_weights)
 
         if self.parallel_clients and len(sampled_clients) > 1:
             with ThreadPoolExecutor(max_workers=len(sampled_clients)) as executor:
@@ -217,11 +261,17 @@ class NFJDServer:
         avg_rescale = sum(rescale_factors) / len(rescale_factors) if rescale_factors else 1.0
         avg_local_epochs = sum(local_epochs_list) // len(local_epochs_list) if local_epochs_list else 1
 
+        objective_values = self.evaluate_global_objectives()
+        self.previous_objectives = list(objective_values)
+
+        task_weight_list = [float(v.item()) for v in task_weights.detach().cpu()]
+        task_weight_gap = max(task_weight_list) - min(task_weight_list) if task_weight_list else 0.0
+
         return RoundStats(
             round_idx=round_idx,
             sampled_client_ids=sampled_ids,
             num_sampled_clients=len(sampled_clients),
-            objective_values=self.evaluate_global_objectives(),
+            objective_values=objective_values,
             delta_norm=float(torch.norm(aggregated_delta, p=2).item()),
             global_momentum_norm=float(torch.norm(momentum_delta, p=2).item()),
             round_time=round_time,
@@ -234,6 +284,8 @@ class NFJDServer:
             avg_local_epochs=avg_local_epochs,
             avg_cosine_sim=avg_cosine_sim,
             effective_global_beta=effective_beta,
+            task_weights=task_weight_list,
+            task_weight_gap=task_weight_gap,
             method_name="nfjd",
         )
 

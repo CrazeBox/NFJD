@@ -71,7 +71,10 @@ def _run_single(method, m, seed, conflict_strength, num_rounds=50,
                             device=device, global_momentum_beta=0.0,
                             conflict_aware_momentum=False,
                             momentum_min_beta=0.1, parallel_clients=False,
-                            eval_dataset=fed_data.val_dataset)
+                            eval_dataset=fed_data.val_dataset,
+                            use_global_progress_weights=True,
+                            progress_beta=2.0, progress_min_weight=0.5,
+                            progress_max_weight=2.0)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
         clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], batch_size=32, device=device, use_full_loader=True, local_epochs=local_epochs) for i in range(num_clients)]

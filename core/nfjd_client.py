@@ -215,7 +215,12 @@ class NFJDClient:
             return 200
         return 250
 
-    def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> ClientResult:
+    def local_update(
+        self,
+        model: nn.Module,
+        objective_fn: ObjectiveFn,
+        task_weights: torch.Tensor | None = None,
+    ) -> ClientResult:
         start = time.time()
         self.prev_lambda = None
         self._objective_norm_ema = None
@@ -246,7 +251,6 @@ class NFJDClient:
                 with torch.amp.autocast("cuda", enabled=self.use_mixed_precision):
                     predictions = model(batch_inputs)
                     losses = objective_fn(predictions, batch_targets, batch_inputs)
-                total_loss = sum(losses)
                 if m is None:
                     m = len(losses)
                     dynamic_iters = self._compute_dynamic_iters(m)
@@ -259,6 +263,14 @@ class NFJDClient:
                     )
                     if self.stochastic_solver is not None:
                         self.stochastic_solver.max_iters = dynamic_iters
+
+                if task_weights is None:
+                    weights_t = torch.ones(m, dtype=losses[0].dtype, device=self.device)
+                else:
+                    weights_t = task_weights.to(self.device, dtype=losses[0].dtype)
+                    if weights_t.numel() != m:
+                        raise ValueError(f"Expected {m} task weights, got {weights_t.numel()}.")
+                total_loss = sum(weights_t[i] * losses[i] for i in range(m))
 
                 need_recompute = self.exact_upgrad or (step_idx % self.recompute_interval == 0) or (self.prev_lambda is None)
 
@@ -287,6 +299,8 @@ class NFJDClient:
                     jacobian = torch.stack(independent_grads, dim=0)
                     last_raw_jacobian = jacobian.detach().clone()
                     jacobian = self._normalize_jacobian(jacobian)
+                    objective_weights = weights_t[objective_indices].unsqueeze(1)
+                    jacobian = jacobian * objective_weights
 
                     if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                         direction, sampled_indices = self.stochastic_solver.solve_sampled(
@@ -313,7 +327,7 @@ class NFJDClient:
                 else:
                     if self.prev_lambda is not None:
                         lam = self.prev_lambda.detach()
-                        L_total = sum(lam[i] * losses[i] for i in range(m))
+                        L_total = sum(lam[i] * weights_t[i] * losses[i] for i in range(m))
                         shared_grads = torch.autograd.grad(L_total, shared_params, retain_graph=bool(head_params), allow_unused=True)
                         direction = _flatten_gradient_list(shared_grads, shared_params)
                         head_grads = torch.autograd.grad(total_loss, head_params, allow_unused=True) if head_params else tuple()
@@ -342,6 +356,8 @@ class NFJDClient:
                         jacobian = torch.stack(independent_grads, dim=0)
                         last_raw_jacobian = jacobian.detach().clone()
                         jacobian = self._normalize_jacobian(jacobian)
+                        objective_weights = weights_t[objective_indices].unsqueeze(1)
+                        jacobian = jacobian * objective_weights
 
                         if self.stochastic_solver is not None and m > self.stochastic_solver.subset_size:
                             direction, sampled_indices = self.stochastic_solver.solve_sampled(

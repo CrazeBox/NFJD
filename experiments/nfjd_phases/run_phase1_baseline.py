@@ -77,7 +77,10 @@ def _run_single(method, dataset, m, seed, num_rounds=50,
         server = NFJDServer(model=model, clients=clients, objective_fn=objective_fn,
                             participation_rate=participation_rate, learning_rate=learning_rate,
                             device=device, global_momentum_beta=0.0,
-                            parallel_clients=False, eval_dataset=fed_data.val_dataset)
+                            parallel_clients=False, eval_dataset=fed_data.val_dataset,
+                            use_global_progress_weights=True,
+                            progress_beta=2.0, progress_min_weight=0.5,
+                            progress_max_weight=2.0)
         trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
     elif method == "fedjd":
         clients = [FedJDClient(client_id=i, dataset=fed_data.client_datasets[i], **baseline_client_kwargs) for i in range(num_clients)]
