@@ -101,6 +101,15 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         official_repo="",
         implementation_note="A lighter practical candidate between exact and fast NFJD: cached solves every 2 steps, stochastic task subsets for many-task cases, mild momentum, and smoothed progress weights without adaptive rescaling.",
     ),
+    "nfjd_fedprox_shared": Phase5MethodSpec(
+        method="nfjd_fedprox_shared",
+        display_name="NFJD+FedProx(shared)",
+        family="proposed_ablation",
+        paper_title="NFJD with shared-trunk FedProx regularization (this repository)",
+        paper_url="",
+        official_repo="",
+        implementation_note="Exact NFJD on shared parameters with an added shared-trunk proximal term toward the current global model, used to test whether client drift rather than task weighting is the main non-IID bottleneck.",
+    ),
     "fedavg_ls": Phase5MethodSpec(
         method="fedavg_ls",
         display_name="FedAvg+LS",

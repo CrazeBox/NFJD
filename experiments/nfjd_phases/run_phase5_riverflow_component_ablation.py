@@ -39,6 +39,7 @@ DEFAULT_SEEDS = [7, 42, 123]
 DEFAULT_METHODS = [
     "nfjd_cached",
     "nfjd_softweight",
+    "nfjd_fedprox_shared",
     "nfjd_hybrid",
     "nfjd_fast",
     "fedavg_cagrad",

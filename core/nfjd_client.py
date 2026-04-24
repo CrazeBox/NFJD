@@ -152,6 +152,7 @@ class NFJDClient:
         objective_norm_momentum: float = 0.9,
         objective_norm_epsilon: float = 1e-8,
         upload_align_scores: bool = True,
+        shared_prox_mu: float = 0.0,
     ) -> None:
         self.client_id = client_id
         self.dataset = dataset
@@ -169,6 +170,7 @@ class NFJDClient:
         self.objective_norm_momentum = objective_norm_momentum
         self.objective_norm_epsilon = objective_norm_epsilon
         self.upload_align_scores = upload_align_scores
+        self.shared_prox_mu = max(float(shared_prox_mu), 0.0)
 
         self.prev_lambda: torch.Tensor | None = None
         self._objective_norm_ema: torch.Tensor | None = None
@@ -294,7 +296,11 @@ class NFJDClient:
                             retain_graph=grad_pos < len(objective_indices) - 1 or bool(head_params),
                             allow_unused=True,
                         )
-                        independent_grads.append(_flatten_gradient_list(grads, shared_params))
+                        flat_grad = _flatten_gradient_list(grads, shared_params)
+                        if self.shared_prox_mu > 0:
+                            prox_offset = flatten_parameters(shared_params) - theta_init_shared
+                            flat_grad = flat_grad + self.shared_prox_mu * prox_offset
+                        independent_grads.append(flat_grad)
 
                     jacobian = torch.stack(independent_grads, dim=0)
                     last_raw_jacobian = jacobian.detach().clone()
@@ -330,6 +336,9 @@ class NFJDClient:
                         L_total = sum(lam[i] * weights_t[i] * losses[i] for i in range(m))
                         shared_grads = torch.autograd.grad(L_total, shared_params, retain_graph=bool(head_params), allow_unused=True)
                         direction = _flatten_gradient_list(shared_grads, shared_params)
+                        if self.shared_prox_mu > 0:
+                            prox_offset = flatten_parameters(shared_params) - theta_init_shared
+                            direction = direction + self.shared_prox_mu * prox_offset
                         head_grads = torch.autograd.grad(total_loss, head_params, allow_unused=True) if head_params else tuple()
                         if self.adaptive_rescaling is not None:
                             direction = direction * last_rescale_factor
@@ -351,7 +360,11 @@ class NFJDClient:
                                 retain_graph=grad_pos < len(objective_indices) - 1 or bool(head_params),
                                 allow_unused=True,
                             )
-                            independent_grads.append(_flatten_gradient_list(grads, shared_params))
+                            flat_grad = _flatten_gradient_list(grads, shared_params)
+                            if self.shared_prox_mu > 0:
+                                prox_offset = flatten_parameters(shared_params) - theta_init_shared
+                                flat_grad = flat_grad + self.shared_prox_mu * prox_offset
+                            independent_grads.append(flat_grad)
 
                         jacobian = torch.stack(independent_grads, dim=0)
                         last_raw_jacobian = jacobian.detach().clone()

@@ -42,6 +42,7 @@ DEFAULT_METHODS = [
     "nfjd_momentum",
     "nfjd_rescale",
     "nfjd_softweight",
+    "nfjd_fedprox_shared",
     "nfjd_hybrid",
     "nfjd_fast",
     "fedavg_cagrad",
