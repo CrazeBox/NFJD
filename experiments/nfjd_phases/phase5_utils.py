@@ -22,12 +22,71 @@ from fedjd.metrics import (
 
 logger = logging.getLogger(__name__)
 
+NFJD_VARIANT_CONFIGS = {
+    "nfjd": {
+        "use_adaptive_rescaling": False,
+        "use_stochastic_gramian": False,
+        "stochastic_subset_size": None,
+        "recompute_interval": 1,
+        "exact_upgrad": True,
+        "use_objective_normalization": True,
+        "use_global_progress_weights": True,
+        "progress_beta": 2.0,
+        "progress_min_weight": 0.5,
+        "progress_max_weight": 2.0,
+        "progress_ema_beta": 0.0,
+        "progress_max_change": 0.0,
+        "local_momentum_beta": 0.0,
+        "global_momentum_beta": 0.0,
+        "conflict_aware_momentum": False,
+        "upload_align_scores": False,
+    },
+    "nfjd_fast": {
+        "use_adaptive_rescaling": True,
+        "use_stochastic_gramian": True,
+        "stochastic_subset_size": 4,
+        "recompute_interval": 4,
+        "exact_upgrad": False,
+        "use_objective_normalization": True,
+        "use_global_progress_weights": True,
+        "progress_beta": 0.75,
+        "progress_min_weight": 0.7,
+        "progress_max_weight": 1.5,
+        "progress_ema_beta": 0.8,
+        "progress_max_change": 0.1,
+        "local_momentum_beta": 0.5,
+        "global_momentum_beta": 0.5,
+        "conflict_aware_momentum": False,
+        "upload_align_scores": False,
+    },
+    "nfjd_noweight": {
+        "use_adaptive_rescaling": False,
+        "use_stochastic_gramian": False,
+        "stochastic_subset_size": None,
+        "recompute_interval": 1,
+        "exact_upgrad": True,
+        "use_objective_normalization": True,
+        "use_global_progress_weights": False,
+        "progress_beta": 0.0,
+        "progress_min_weight": 1.0,
+        "progress_max_weight": 1.0,
+        "progress_ema_beta": 0.0,
+        "progress_max_change": 0.0,
+        "local_momentum_beta": 0.0,
+        "global_momentum_beta": 0.0,
+        "conflict_aware_momentum": False,
+        "upload_align_scores": False,
+    },
+}
+
 ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "data_split", "m", "seed", "num_rounds",
     "num_clients", "participation_rate", "learning_rate", "local_epochs",
     "use_adaptive_rescaling", "use_stochastic_gramian", "conflict_aware_momentum",
     "use_objective_normalization", "exact_upgrad", "use_global_progress_weights",
     "progress_beta", "progress_min_weight", "progress_max_weight",
+    "progress_ema_beta", "progress_max_change", "stochastic_subset_size",
+    "recompute_interval", "local_momentum_beta", "global_momentum_beta",
     "model_arch", "total_local_steps",
     "elapsed_time", "all_decreased", "avg_ri",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
@@ -46,29 +105,37 @@ for _i in range(MAX_M):
 def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                   device, num_rounds, num_clients, participation_rate,
                   learning_rate, local_epochs=1, eval_dataset=None):
-    if method == "nfjd":
+    if method in NFJD_VARIANT_CONFIGS:
+        cfg = NFJD_VARIANT_CONFIGS[method]
+        subset_size = cfg["stochastic_subset_size"] or min(4, m)
         clients = [NFJDClient(
             client_id=i, dataset=client_datasets[i], batch_size=256,
             device=device, local_epochs=local_epochs, learning_rate=learning_rate,
-            local_momentum_beta=0.0, use_adaptive_rescaling=False,
-            use_stochastic_gramian=False, stochastic_subset_size=min(4, m),
-            stochastic_seed=seed + i, conflict_aware_momentum=False,
+            local_momentum_beta=cfg["local_momentum_beta"],
+            use_adaptive_rescaling=cfg["use_adaptive_rescaling"],
+            use_stochastic_gramian=cfg["use_stochastic_gramian"],
+            stochastic_subset_size=min(subset_size, m),
+            stochastic_seed=seed + i,
+            conflict_aware_momentum=cfg["conflict_aware_momentum"],
             momentum_min_beta=0.1,
-            recompute_interval=1,
-            exact_upgrad=True,
-            use_objective_normalization=True,
-            upload_align_scores=False,
+            recompute_interval=cfg["recompute_interval"],
+            exact_upgrad=cfg["exact_upgrad"],
+            use_objective_normalization=cfg["use_objective_normalization"],
+            upload_align_scores=cfg["upload_align_scores"],
         ) for i in range(num_clients)]
         server = NFJDServer(
             model=model, clients=clients, objective_fn=objective_fn,
             participation_rate=participation_rate, learning_rate=learning_rate,
-            device=device, global_momentum_beta=0.0,
-            conflict_aware_momentum=False, momentum_min_beta=0.1,
+            device=device, global_momentum_beta=cfg["global_momentum_beta"],
+            conflict_aware_momentum=cfg["conflict_aware_momentum"], momentum_min_beta=0.1,
             parallel_clients=False, eval_dataset=eval_dataset,
-            use_global_progress_weights=True,
-            progress_beta=2.0,
-            progress_min_weight=0.5,
-            progress_max_weight=2.0,
+            use_global_progress_weights=cfg["use_global_progress_weights"],
+            progress_beta=cfg["progress_beta"],
+            progress_min_weight=cfg["progress_min_weight"],
+            progress_max_weight=cfg["progress_max_weight"],
+            progress_ema_beta=cfg["progress_ema_beta"],
+            progress_max_change=cfg["progress_max_change"],
+            method_name=method,
         )
         return NFJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -155,7 +222,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
     avg_cosine_sim = 0.0
     avg_effective_beta = 0.9
     avg_task_weight_gap = 0.0
-    if method == "nfjd":
+    if method in NFJD_VARIANT_CONFIGS:
         rescale_vals = [s.avg_rescale_factor for s in history]
         avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
         cosine_vals = [getattr(s, "avg_cosine_sim", 0.0) for s in history]
@@ -167,6 +234,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
 
     total_local_steps = local_epochs * sum(max(int(getattr(s, "num_sampled_clients", 0)), 0) for s in history)
     spec = get_phase5_method_spec(method)
+    nfjd_cfg = NFJD_VARIANT_CONFIGS.get(method)
 
     row = {
         "exp_id": exp_id, "method": method, "dataset": dataset,
@@ -174,15 +242,21 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "num_rounds": num_rounds, "num_clients": num_clients,
         "participation_rate": participation_rate,
         "learning_rate": learning_rate, "local_epochs": local_epochs,
-        "use_adaptive_rescaling": False,
-        "use_stochastic_gramian": False,
-        "conflict_aware_momentum": False,
-        "use_objective_normalization": method == "nfjd",
-        "exact_upgrad": method == "nfjd",
-        "use_global_progress_weights": method == "nfjd",
-        "progress_beta": 2.0 if method == "nfjd" else "",
-        "progress_min_weight": 0.5 if method == "nfjd" else "",
-        "progress_max_weight": 2.0 if method == "nfjd" else "",
+        "use_adaptive_rescaling": nfjd_cfg["use_adaptive_rescaling"] if nfjd_cfg else False,
+        "use_stochastic_gramian": nfjd_cfg["use_stochastic_gramian"] if nfjd_cfg else False,
+        "conflict_aware_momentum": nfjd_cfg["conflict_aware_momentum"] if nfjd_cfg else False,
+        "use_objective_normalization": nfjd_cfg["use_objective_normalization"] if nfjd_cfg else False,
+        "exact_upgrad": nfjd_cfg["exact_upgrad"] if nfjd_cfg else False,
+        "use_global_progress_weights": nfjd_cfg["use_global_progress_weights"] if nfjd_cfg else False,
+        "progress_beta": nfjd_cfg["progress_beta"] if nfjd_cfg else "",
+        "progress_min_weight": nfjd_cfg["progress_min_weight"] if nfjd_cfg else "",
+        "progress_max_weight": nfjd_cfg["progress_max_weight"] if nfjd_cfg else "",
+        "progress_ema_beta": nfjd_cfg["progress_ema_beta"] if nfjd_cfg else "",
+        "progress_max_change": nfjd_cfg["progress_max_change"] if nfjd_cfg else "",
+        "stochastic_subset_size": (nfjd_cfg["stochastic_subset_size"] or min(4, m)) if nfjd_cfg else "",
+        "recompute_interval": nfjd_cfg["recompute_interval"] if nfjd_cfg else "",
+        "local_momentum_beta": nfjd_cfg["local_momentum_beta"] if nfjd_cfg else "",
+        "global_momentum_beta": nfjd_cfg["global_momentum_beta"] if nfjd_cfg else "",
         "model_arch": model_arch,
         "total_local_steps": total_local_steps,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,

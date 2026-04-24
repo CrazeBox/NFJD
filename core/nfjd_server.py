@@ -58,6 +58,9 @@ class NFJDServer:
         progress_beta: float = 2.0,
         progress_min_weight: float = 0.5,
         progress_max_weight: float = 2.0,
+        progress_ema_beta: float = 0.0,
+        progress_max_change: float = 0.0,
+        method_name: str = "nfjd",
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -77,6 +80,9 @@ class NFJDServer:
         self.progress_beta = progress_beta
         self.progress_min_weight = progress_min_weight
         self.progress_max_weight = progress_max_weight
+        self.progress_ema_beta = progress_ema_beta
+        self.progress_max_change = progress_max_change
+        self.method_name = method_name
         self.initial_objectives: list[float] | None = None
         self.previous_objectives: list[float] | None = None
         self.task_weights: torch.Tensor | None = None
@@ -107,6 +113,19 @@ class NFJDServer:
         deficit = torch.mean(ri) - ri
         weights = torch.exp(self.progress_beta * deficit)
         weights = torch.clamp(weights, min=self.progress_min_weight, max=self.progress_max_weight)
+        weights = weights / torch.clamp(torch.mean(weights), min=1e-8)
+
+        if self.task_weights is not None and self.progress_max_change > 0:
+            max_ratio = 1.0 + self.progress_max_change
+            min_ratio = max(1.0 - self.progress_max_change, 1e-6)
+            lower = self.task_weights * min_ratio
+            upper = self.task_weights * max_ratio
+            weights = torch.minimum(torch.maximum(weights, lower), upper)
+
+        if self.task_weights is not None and self.progress_ema_beta > 0:
+            beta = min(max(self.progress_ema_beta, 0.0), 0.999)
+            weights = beta * self.task_weights + (1.0 - beta) * weights
+
         weights = weights / torch.clamp(torch.mean(weights), min=1e-8)
         self.task_weights = weights.detach()
         return self.task_weights
@@ -286,6 +305,6 @@ class NFJDServer:
             effective_global_beta=effective_beta,
             task_weights=task_weight_list,
             task_weight_gap=task_weight_gap,
-            method_name="nfjd",
+            method_name=self.method_name,
         )
 
