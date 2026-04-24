@@ -34,6 +34,7 @@ class RoundStats:
     avg_rescale_factor: float = 1.0
     avg_local_epochs: int = 0
     avg_cosine_sim: float = 0.0
+    avg_prox_ratio: float = 0.0
     effective_global_beta: float = 0.9
     task_weights: list[float] = field(default_factory=list)
     task_weight_gap: float = 0.0
@@ -189,6 +190,7 @@ class NFJDServer:
         rescale_factors = []
         local_epochs_list = []
         cosine_sims = []
+        prox_ratios = []
 
         def _run_single_client(client):
             model_clone = self._clone_model()
@@ -210,6 +212,7 @@ class NFJDServer:
         rescale_factors = []
         local_epochs_list = []
         cosine_sims = []
+        prox_ratios = []
 
         for result in results:
             weight = result.num_examples / total_examples
@@ -223,6 +226,7 @@ class NFJDServer:
             rescale_factors.append(result.rescale_factor)
             local_epochs_list.append(result.num_local_epochs)
             cosine_sims.append(result.avg_cosine_sim)
+            prox_ratios.append(result.avg_prox_ratio)
 
         client_compute_time = time.time() - client_start
 
@@ -260,6 +264,7 @@ class NFJDServer:
         aggregation_time = time.time() - agg_start
 
         avg_cosine_sim = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
+        avg_prox_ratio = sum(prox_ratios) / len(prox_ratios) if prox_ratios else 0.0
         if self.conflict_aware_momentum:
             momentum_delta = self.global_momentum.update(aggregated_delta, avg_cosine_sim=avg_cosine_sim)
         else:
@@ -302,6 +307,7 @@ class NFJDServer:
             avg_rescale_factor=avg_rescale,
             avg_local_epochs=avg_local_epochs,
             avg_cosine_sim=avg_cosine_sim,
+            avg_prox_ratio=avg_prox_ratio,
             effective_global_beta=effective_beta,
             task_weights=task_weight_list,
             task_weight_gap=task_weight_gap,

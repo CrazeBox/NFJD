@@ -122,6 +122,7 @@ class ClientResult:
     rescale_factor: float = 1.0
     sampled_indices: list[int] | None = None
     avg_cosine_sim: float = 0.0
+    avg_prox_ratio: float = 0.0
     jacobian: torch.Tensor | None = None
     align_scores: torch.Tensor | None = None
 
@@ -238,6 +239,7 @@ class NFJDClient:
         step_idx = 0
         rescale_history: list[float] = []
         cosine_history: list[float] = []
+        prox_ratio_history: list[float] = []
         last_avg_cosine_sim = 0.0
         last_raw_jacobian = None
         shared_params, head_params = get_model_parameter_groups(model)
@@ -299,7 +301,9 @@ class NFJDClient:
                         flat_grad = _flatten_gradient_list(grads, shared_params)
                         if self.shared_prox_mu > 0:
                             prox_offset = flatten_parameters(shared_params) - theta_init_shared
-                            flat_grad = flat_grad + self.shared_prox_mu * prox_offset
+                            prox_term = self.shared_prox_mu * prox_offset
+                            prox_ratio_history.append(float(torch.norm(prox_term, p=2).item() / (torch.norm(flat_grad, p=2).item() + 1e-12)))
+                            flat_grad = flat_grad + prox_term
                         independent_grads.append(flat_grad)
 
                     jacobian = torch.stack(independent_grads, dim=0)
@@ -338,7 +342,9 @@ class NFJDClient:
                         direction = _flatten_gradient_list(shared_grads, shared_params)
                         if self.shared_prox_mu > 0:
                             prox_offset = flatten_parameters(shared_params) - theta_init_shared
-                            direction = direction + self.shared_prox_mu * prox_offset
+                            prox_term = self.shared_prox_mu * prox_offset
+                            prox_ratio_history.append(float(torch.norm(prox_term, p=2).item() / (torch.norm(direction, p=2).item() + 1e-12)))
+                            direction = direction + prox_term
                         head_grads = torch.autograd.grad(total_loss, head_params, allow_unused=True) if head_params else tuple()
                         if self.adaptive_rescaling is not None:
                             direction = direction * last_rescale_factor
@@ -363,7 +369,9 @@ class NFJDClient:
                             flat_grad = _flatten_gradient_list(grads, shared_params)
                             if self.shared_prox_mu > 0:
                                 prox_offset = flatten_parameters(shared_params) - theta_init_shared
-                                flat_grad = flat_grad + self.shared_prox_mu * prox_offset
+                                prox_term = self.shared_prox_mu * prox_offset
+                                prox_ratio_history.append(float(torch.norm(prox_term, p=2).item() / (torch.norm(flat_grad, p=2).item() + 1e-12)))
+                                flat_grad = flat_grad + prox_term
                             independent_grads.append(flat_grad)
 
                         jacobian = torch.stack(independent_grads, dim=0)
@@ -412,6 +420,7 @@ class NFJDClient:
 
         avg_rescale_factor = sum(rescale_history) / len(rescale_history) if rescale_history else last_rescale_factor
         avg_cosine_sim = sum(cosine_history) / len(cosine_history) if cosine_history else last_avg_cosine_sim
+        avg_prox_ratio = sum(prox_ratio_history) / len(prox_ratio_history) if prox_ratio_history else 0.0
 
         return ClientResult(
             client_id=self.client_id,
@@ -423,6 +432,7 @@ class NFJDClient:
             rescale_factor=avg_rescale_factor,
             sampled_indices=sampled_indices,
             avg_cosine_sim=avg_cosine_sim,
+            avg_prox_ratio=avg_prox_ratio,
             jacobian=last_raw_jacobian.detach().clone() if last_raw_jacobian is not None else None,
             align_scores=align_scores.detach().clone() if align_scores is not None else None,
         )

@@ -208,7 +208,7 @@ ALL_FIELDNAMES = [
     "model_arch", "total_local_steps",
     "elapsed_time", "all_decreased", "avg_ri",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
-    "avg_rescale_factor", "avg_cosine_sim", "avg_effective_beta",
+    "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_effective_beta",
     "avg_task_weight_gap",
     "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
     "avg_mse", "max_mse", "mse_std",
@@ -339,6 +339,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
 
     avg_rescale = 1.0
     avg_cosine_sim = 0.0
+    avg_prox_ratio = 0.0
     avg_effective_beta = 0.9
     avg_task_weight_gap = 0.0
     if method in NFJD_VARIANT_CONFIGS:
@@ -346,6 +347,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
         cosine_vals = [getattr(s, "avg_cosine_sim", 0.0) for s in history]
         avg_cosine_sim = sum(cosine_vals) / len(cosine_vals) if cosine_vals else 0.0
+        prox_vals = [getattr(s, "avg_prox_ratio", 0.0) for s in history]
+        avg_prox_ratio = sum(prox_vals) / len(prox_vals) if prox_vals else 0.0
         beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
         avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
         weight_gap_vals = [getattr(s, "task_weight_gap", 0.0) for s in history]
@@ -386,6 +389,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "upload_per_client": round(upload_per_client, 0),
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine_sim, 4),
+        "avg_prox_ratio": round(avg_prox_ratio, 6),
         "avg_effective_beta": round(avg_effective_beta, 4),
         "avg_task_weight_gap": round(avg_task_weight_gap, 4),
         "avg_accuracy": "", "avg_f1": "", "task_jfi": "", "task_mmag": "",

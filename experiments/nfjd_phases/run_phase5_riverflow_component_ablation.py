@@ -15,6 +15,7 @@ from fedjd.experiments.nfjd_phases.phase5_utils import (
     cleanup,
     evaluate_model,
     fill_regression_metrics,
+    NFJD_VARIANT_CONFIGS,
     run_experiment,
     write_csv,
 )
@@ -49,12 +50,18 @@ DEFAULT_METHODS = [
 
 def run_riverflow_component(method, seed, iid=True, num_rounds=50,
                             num_clients=10, participation_rate=0.5,
-                            learning_rate=0.001, num_tasks=8):
+                            learning_rate=0.001, num_tasks=8, shared_prox_mu=None):
     split_name = "iid" if iid else "noniid"
-    exp_id = f"P5-rf-comp-{method}-{split_name}-m{num_tasks}-seed{seed}"
+    suffix = "" if shared_prox_mu is None else f"-mu{shared_prox_mu:g}"
+    exp_id = f"P5-rf-comp-{method}-{split_name}-m{num_tasks}{suffix}-seed{seed}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     random.seed(seed)
+
+    if shared_prox_mu is not None:
+        if method != "nfjd_fedprox_shared":
+            raise ValueError("shared_prox_mu override is only supported for nfjd_fedprox_shared.")
+        NFJD_VARIANT_CONFIGS[method]["shared_prox_mu"] = float(shared_prox_mu)
 
     data = make_river_flow(num_clients=num_clients, iid=iid, seed=seed, num_tasks=num_tasks)
     model = RiverFlowMLP(input_dim=data["input_dim"], num_tasks=num_tasks)
@@ -89,6 +96,7 @@ def parse_args():
     parser.add_argument("--tasks", nargs="+", type=int, default=[8])
     parser.add_argument("--splits", nargs="+", choices=["iid", "noniid"], default=["iid"])
     parser.add_argument("--rounds", type=int, default=50)
+    parser.add_argument("--shared-prox-mus", nargs="+", type=float, default=[])
     return parser.parse_args()
 
 
@@ -100,14 +108,17 @@ def main():
         for split in args.splits:
             iid = split == "iid"
             for method in args.methods:
-                for seed in args.seeds:
-                    experiments.append(dict(
-                        method=method,
-                        seed=seed,
-                        iid=iid,
-                        num_rounds=args.rounds,
-                        num_tasks=num_tasks,
-                    ))
+                prox_values = args.shared_prox_mus if (method == "nfjd_fedprox_shared" and args.shared_prox_mus) else [None]
+                for prox_mu in prox_values:
+                    for seed in args.seeds:
+                        experiments.append(dict(
+                            method=method,
+                            seed=seed,
+                            iid=iid,
+                            num_rounds=args.rounds,
+                            num_tasks=num_tasks,
+                            shared_prox_mu=prox_mu,
+                        ))
 
     logger.info("Starting RiverFlow component ablation: %d experiments", len(experiments))
     for idx, exp in enumerate(experiments):
