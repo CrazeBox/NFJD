@@ -14,7 +14,7 @@ from fedjd.aggregators import MinNormAggregator
 from fedjd.core.scaling import GlobalMomentum
 
 from .evaluation import evaluate_objectives_on_dataset
-from .nfjd_client import NFJDClient, ObjectiveFn, flatten_parameters, assign_flat_parameters, flatten_gradients, get_model_parameter_groups, _flatten_gradient_list
+from .nfjd_client import NFJDClient, ObjectiveFn, flatten_parameters, assign_flat_parameters, flatten_gradients, get_model_parameter_groups, _flatten_gradient_list, _project_onto_dual_cone
 
 
 @dataclass
@@ -36,6 +36,7 @@ class RoundStats:
     avg_cosine_sim: float = 0.0
     avg_prox_ratio: float = 0.0
     avg_scaffold_ratio: float = 0.0
+    avg_preprocess_alpha: float = 0.0
     avg_cone_margin: float = 0.0
     avg_cone_cosine: float = 0.0
     effective_global_beta: float = 0.9
@@ -69,6 +70,12 @@ class NFJDServer:
         cone_reference_mode: str = "delta",
         cone_basis_size: int = 0,
         use_shared_scaffold: bool = False,
+        public_preprocess_alpha: float = 0.0,
+        public_preprocess_mode: str = "",
+        public_preprocess_positive_only: bool = False,
+        public_preprocess_center_mode: str = "mean",
+        public_preprocess_trim_k: int = 0,
+        public_preprocess_adaptive_mode: str = "fixed",
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -95,13 +102,75 @@ class NFJDServer:
         self.cone_reference_mode = cone_reference_mode
         self.cone_basis_size = max(int(cone_basis_size), 0)
         self.use_shared_scaffold = use_shared_scaffold
+        self.public_preprocess_alpha = max(float(public_preprocess_alpha), 0.0)
+        self.public_preprocess_mode = public_preprocess_mode
+        self.public_preprocess_positive_only = public_preprocess_positive_only
+        self.public_preprocess_center_mode = public_preprocess_center_mode
+        self.public_preprocess_trim_k = max(int(public_preprocess_trim_k), 0)
+        self.public_preprocess_adaptive_mode = public_preprocess_adaptive_mode
         self.initial_objectives: list[float] | None = None
         self.previous_objectives: list[float] | None = None
         self.task_weights: torch.Tensor | None = None
         self.shared_direction_reference: torch.Tensor | None = None
         self.shared_direction_basis: torch.Tensor | None = None
+        self.shared_preprocess_direction: torch.Tensor | None = None
         shared_params, _ = get_model_parameter_groups(self.model)
         self.shared_control_global = torch.zeros_like(flatten_parameters(shared_params), device=self.device) if self.use_shared_scaffold and shared_params else None
+
+    def _compute_public_reference_center(
+        self,
+        normalized_directions: list[torch.Tensor],
+        weights: list[float],
+    ) -> torch.Tensor | None:
+        if not normalized_directions:
+            return None
+
+        if self.public_preprocess_center_mode == "trimmed_mean" and len(normalized_directions) > 2 and self.public_preprocess_trim_k > 0:
+            similarities = []
+            for idx, direction in enumerate(normalized_directions):
+                avg_similarity = sum(
+                    float(torch.dot(direction, normalized_directions[j]).item())
+                    for j in range(len(normalized_directions)) if j != idx
+                ) / max(len(normalized_directions) - 1, 1)
+                similarities.append((avg_similarity, idx))
+            similarities.sort(reverse=True)
+            keep_count = max(len(normalized_directions) - self.public_preprocess_trim_k, 1)
+            selected_indices = [idx for _, idx in similarities[:keep_count]]
+            center = sum(normalized_directions[idx] * weights[idx] for idx in selected_indices)
+        elif self.public_preprocess_center_mode == "geometric_median":
+            center = sum(direction * weight for direction, weight in zip(normalized_directions, weights))
+            center_norm = torch.norm(center, p=2)
+            if center_norm.item() <= 1e-12:
+                center = normalized_directions[0]
+            else:
+                center = center / center_norm
+            eps = 1e-6
+            for _ in range(25):
+                numerator = torch.zeros_like(center)
+                denom = 0.0
+                for direction, weight in zip(normalized_directions, weights):
+                    chord = torch.norm(center - direction, p=2).item()
+                    inv_dist = weight / max(chord, eps)
+                    numerator.add_(direction, alpha=inv_dist)
+                    denom += inv_dist
+                if denom <= 0.0:
+                    break
+                candidate = numerator / denom
+                cand_norm = torch.norm(candidate, p=2)
+                if cand_norm.item() <= 1e-12:
+                    break
+                candidate = candidate / cand_norm
+                if torch.norm(candidate - center, p=2).item() <= 1e-6:
+                    center = candidate
+                    break
+                center = candidate
+        else:
+            center = sum(direction * weight for direction, weight in zip(normalized_directions, weights))
+
+        center_norm = torch.norm(center, p=2)
+        if center_norm.item() <= 1e-12:
+            return None
+        return center / center_norm
 
     def _compute_validation_shared_reference(self) -> torch.Tensor | None:
         if self.eval_dataset is None:
@@ -175,6 +244,46 @@ class NFJDServer:
                 break
             selected.append(best_idx)
         return torch.stack([normalized[idx] for idx in selected], dim=0).detach()
+
+    def _compute_common_safe_ray(
+        self,
+        sampled_clients: list[NFJDClient],
+        task_weights: torch.Tensor,
+        total_examples: int,
+    ) -> torch.Tensor | None:
+        probe_directions = []
+        probe_jacobians = []
+        for client in sampled_clients:
+            model_clone = self._clone_model()
+            probe_direction, probe_jacobian = client.probe_shared_geometry(model_clone, self.objective_fn, task_weights=task_weights)
+            if probe_direction is not None:
+                probe_directions.append((probe_direction.to(self.device), client.num_examples / total_examples))
+            if probe_jacobian is not None:
+                probe_jacobians.append(probe_jacobian.to(self.device))
+
+        if not probe_directions or not probe_jacobians:
+            return None
+
+        normalized_directions = []
+        weights = []
+        for direction, weight in probe_directions:
+            norm = torch.norm(direction, p=2)
+            if norm.item() <= 1e-12:
+                continue
+            normalized_directions.append(direction / norm)
+            weights.append(float(weight))
+        if not normalized_directions:
+            return None
+
+        reference = self._compute_public_reference_center(normalized_directions, weights)
+        if reference is None:
+            return None
+        stacked = torch.cat(probe_jacobians, dim=0)
+        common_safe = _project_onto_dual_cone(reference, stacked, max_iters=200, lr=0.1, tol=1e-6)
+        safe_norm = torch.norm(common_safe, p=2)
+        if safe_norm.item() <= 1e-12:
+            return None
+        return (common_safe / safe_norm).detach()
 
     def set_initial_objectives(self, objectives: list[float]) -> None:
         self.initial_objectives = list(objectives)
@@ -270,6 +379,9 @@ class NFJDServer:
         sampled_clients = self.sample_clients()
         total_examples = sum(client.num_examples for client in sampled_clients)
         task_weights = self._compute_task_weights()
+        self.shared_preprocess_direction = None
+        if self.public_preprocess_alpha > 0 and self.public_preprocess_mode == "common_safe_ray":
+            self.shared_preprocess_direction = self._compute_common_safe_ray(sampled_clients, task_weights, total_examples)
         if self.cone_align_alpha > 0 and self.cone_reference_mode == "validation_gradient":
             self.shared_direction_reference = self._compute_validation_shared_reference()
             self.shared_direction_basis = None
@@ -296,6 +408,7 @@ class NFJDServer:
         cosine_sims = []
         prox_ratios = []
         scaffold_ratios = []
+        preprocess_alphas = []
         cone_margins = []
         cone_cosines = []
 
@@ -306,6 +419,10 @@ class NFJDServer:
                 self.objective_fn,
                 task_weights=task_weights,
                 shared_control_global=self.shared_control_global,
+                shared_preprocess_direction=self.shared_preprocess_direction,
+                preprocess_alpha=self.public_preprocess_alpha,
+                preprocess_positive_only=self.public_preprocess_positive_only,
+                preprocess_adaptive_mode=self.public_preprocess_adaptive_mode,
                 cone_reference_shared_direction=self.shared_direction_reference,
                 cone_reference_shared_basis=self.shared_direction_basis,
                 cone_align_alpha=self.cone_align_alpha,
@@ -344,6 +461,7 @@ class NFJDServer:
             cosine_sims.append(result.avg_cosine_sim)
             prox_ratios.append(result.avg_prox_ratio)
             scaffold_ratios.append(result.avg_scaffold_ratio)
+            preprocess_alphas.append(result.avg_preprocess_alpha)
             cone_margins.append(result.avg_cone_margin)
             cone_cosines.append(result.avg_cone_cosine)
 
@@ -402,6 +520,7 @@ class NFJDServer:
         avg_cosine_sim = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
         avg_prox_ratio = sum(prox_ratios) / len(prox_ratios) if prox_ratios else 0.0
         avg_scaffold_ratio = sum(scaffold_ratios) / len(scaffold_ratios) if scaffold_ratios else 0.0
+        avg_preprocess_alpha = sum(preprocess_alphas) / len(preprocess_alphas) if preprocess_alphas else 0.0
         avg_cone_margin = sum(cone_margins) / len(cone_margins) if cone_margins else 0.0
         avg_cone_cosine = sum(cone_cosines) / len(cone_cosines) if cone_cosines else 0.0
         if self.conflict_aware_momentum:
@@ -448,6 +567,7 @@ class NFJDServer:
             avg_cosine_sim=avg_cosine_sim,
             avg_prox_ratio=avg_prox_ratio,
             avg_scaffold_ratio=avg_scaffold_ratio,
+            avg_preprocess_alpha=avg_preprocess_alpha,
             avg_cone_margin=avg_cone_margin,
             avg_cone_cosine=avg_cone_cosine,
             effective_global_beta=effective_beta,

@@ -29,6 +29,7 @@ from fedjd.core import (
 )
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
 from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
+from fedjd.experiments.nfjd_phases.phase5_utils import NFJD_VARIANT_CONFIGS, build_trainer as build_phase5_trainer
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -49,9 +50,9 @@ logger = logging.getLogger(__name__)
 FIELDNAMES = [
     "exp_id", "method", "dataset", "seed", "m", "num_rounds", "num_clients",
     "participation_rate", "learning_rate", "local_epochs", "conflict_strength",
-    "cone_align_alpha", "cone_reference_mode", "cone_basis_size", "cone_align_positive_only", "elapsed_time", "all_decreased", "avg_ri", "task_jfi",
+    "cone_align_alpha", "cone_reference_mode", "cone_basis_size", "cone_align_positive_only", "public_preprocess_alpha", "public_preprocess_mode", "public_preprocess_positive_only", "public_preprocess_center_mode", "public_preprocess_trim_k", "public_preprocess_adaptive_mode", "elapsed_time", "all_decreased", "avg_ri", "task_jfi",
     "task_mmag", "hypervolume", "pareto_gap", "avg_upload_bytes", "avg_round_time",
-    "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio",
+    "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_preprocess_alpha",
     "avg_cone_margin", "avg_cone_cosine",
 ]
 MAX_M = 10
@@ -89,7 +90,7 @@ def _make_data(dataset: str, m: int, seed: int, num_clients: int, conflict_stren
     raise ValueError(f"Unsupported dataset: {dataset}")
 
 
-def _build_nfjd_trainer(method: str, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs, cone_align_alpha, cone_reference_mode, cone_align_positive_only, cone_basis_size):
+def _build_nfjd_trainer(method: str, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs, cone_align_alpha, cone_reference_mode, cone_align_positive_only, cone_basis_size, public_preprocess_alpha, public_preprocess_mode, public_preprocess_positive_only, public_preprocess_center_mode, public_preprocess_trim_k, public_preprocess_adaptive_mode):
     clients = [
         NFJDClient(
             client_id=i,
@@ -133,8 +134,33 @@ def _build_nfjd_trainer(method: str, data, device, seed, num_rounds, num_clients
         cone_align_alpha=cone_align_alpha if method in {"nfjd_cone", "nfjd_cone_basis"} else 0.0,
         cone_reference_mode=cone_reference_mode,
         cone_basis_size=cone_basis_size if method == "nfjd_cone_basis" else 0,
+        public_preprocess_alpha=public_preprocess_alpha if method == "nfjd_common_safe" else 0.0,
+        public_preprocess_mode=public_preprocess_mode if method == "nfjd_common_safe" else "",
+        public_preprocess_positive_only=public_preprocess_positive_only if method == "nfjd_common_safe" else False,
+        public_preprocess_center_mode=public_preprocess_center_mode if method == "nfjd_common_safe" else "mean",
+        public_preprocess_trim_k=public_preprocess_trim_k if method == "nfjd_common_safe" else 0,
+        public_preprocess_adaptive_mode=public_preprocess_adaptive_mode if method == "nfjd_common_safe" else "fixed",
     )
     return NFJDTrainer(server=server, num_rounds=num_rounds)
+
+
+def _build_phase5_variant_trainer(method: str, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs):
+    model = SmallRegressor(input_dim=data.input_dim, output_dim=data.num_objectives)
+    return build_phase5_trainer(
+        method=method,
+        model=model,
+        client_datasets=data.client_datasets,
+        objective_fn=multi_objective_regression,
+        m=data.num_objectives,
+        seed=seed,
+        device=device,
+        num_rounds=num_rounds,
+        num_clients=num_clients,
+        participation_rate=participation_rate,
+        learning_rate=learning_rate,
+        local_epochs=local_epochs,
+        eval_dataset=data.val_dataset,
+    )
 
 
 def _build_legacy_trainer(method: str, data, device, num_rounds, num_clients, participation_rate, learning_rate, local_epochs):
@@ -184,12 +210,17 @@ def _build_official_trainer(method: str, data, device, seed, num_rounds, num_cli
     return FedJDTrainer(server=server, num_rounds=num_rounds)
 
 
-def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, num_clients: int, participation_rate: float, learning_rate: float, local_epochs: int, conflict_strength: float, cone_align_alpha: float, cone_reference_mode: str, cone_align_positive_only: bool, cone_basis_size: int) -> dict:
+def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, num_clients: int, participation_rate: float, learning_rate: float, local_epochs: int, conflict_strength: float, cone_align_alpha: float, cone_reference_mode: str, cone_align_positive_only: bool, cone_basis_size: int, public_preprocess_alpha: float, public_preprocess_mode: str, public_preprocess_positive_only: bool, public_preprocess_center_mode: str, public_preprocess_trim_k: int, public_preprocess_adaptive_mode: str) -> dict:
     if method == "nfjd_cone":
         exp_suffix = f"-a{cone_align_alpha:g}-{cone_reference_mode}"
     elif method == "nfjd_cone_basis":
         gate = "-pos" if cone_align_positive_only else ""
         exp_suffix = f"-a{cone_align_alpha:g}-basis{cone_basis_size}{gate}"
+    elif method == "nfjd_common_safe":
+        gate = "-pos" if public_preprocess_positive_only else ""
+        trim = f"-trim{public_preprocess_trim_k}" if public_preprocess_center_mode == "trimmed_mean" else ""
+        adaptive = f"-{public_preprocess_adaptive_mode}"
+        exp_suffix = f"-a{public_preprocess_alpha:g}-{public_preprocess_mode}-{public_preprocess_center_mode}{trim}{adaptive}{gate}"
     else:
         exp_suffix = ""
     exp_id = f"cone-proto-{dataset}-{method}{exp_suffix}-m{m}-seed{seed}"
@@ -199,8 +230,10 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
 
     data = _make_data(dataset, m, seed, num_clients, conflict_strength)
 
-    if method in {"nfjd", "nfjd_cone", "nfjd_cone_basis"}:
-        trainer = _build_nfjd_trainer(method, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs, cone_align_alpha, cone_reference_mode, cone_align_positive_only, cone_basis_size)
+    if method in {"nfjd_cone", "nfjd_cone_basis", "nfjd_common_safe"}:
+        trainer = _build_nfjd_trainer(method, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs, cone_align_alpha, cone_reference_mode, cone_align_positive_only, cone_basis_size, public_preprocess_alpha, public_preprocess_mode, public_preprocess_positive_only, public_preprocess_center_mode, public_preprocess_trim_k, public_preprocess_adaptive_mode)
+    elif method in NFJD_VARIANT_CONFIGS:
+        trainer = _build_phase5_variant_trainer(method, data, device, seed, num_rounds, num_clients, participation_rate, learning_rate, local_epochs)
     elif method in {"fedjd", "fmgda", "weighted_sum", "direction_avg"}:
         trainer = _build_legacy_trainer(method, data, device, num_rounds, num_clients, participation_rate, learning_rate, local_epochs)
     elif method in {"fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"}:
@@ -219,6 +252,7 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
     avg_rescale = sum(getattr(s, "avg_rescale_factor", 1.0) for s in history) / max(len(history), 1)
     avg_cosine = sum(getattr(s, "avg_cosine_sim", 0.0) for s in history) / max(len(history), 1)
     avg_prox = sum(getattr(s, "avg_prox_ratio", 0.0) for s in history) / max(len(history), 1)
+    avg_preprocess_alpha = sum(getattr(s, "avg_preprocess_alpha", 0.0) for s in history) / max(len(history), 1)
     avg_cone_margin = sum(getattr(s, "avg_cone_margin", 0.0) for s in history) / max(len(history), 1)
     avg_cone_cosine = sum(getattr(s, "avg_cone_cosine", 0.0) for s in history) / max(len(history), 1)
 
@@ -238,6 +272,12 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
         "cone_reference_mode": cone_reference_mode if method in {"nfjd_cone", "nfjd_cone_basis"} else "",
         "cone_basis_size": cone_basis_size if method == "nfjd_cone_basis" else "",
         "cone_align_positive_only": cone_align_positive_only if method in {"nfjd_cone", "nfjd_cone_basis"} else "",
+        "public_preprocess_alpha": public_preprocess_alpha if method == "nfjd_common_safe" else "",
+        "public_preprocess_mode": public_preprocess_mode if method == "nfjd_common_safe" else "",
+        "public_preprocess_positive_only": public_preprocess_positive_only if method == "nfjd_common_safe" else "",
+        "public_preprocess_center_mode": public_preprocess_center_mode if method == "nfjd_common_safe" else "",
+        "public_preprocess_trim_k": public_preprocess_trim_k if method == "nfjd_common_safe" else "",
+        "public_preprocess_adaptive_mode": public_preprocess_adaptive_mode if method == "nfjd_common_safe" else "",
         "elapsed_time": round(elapsed, 2),
         "all_decreased": objective_summary["all_decreased"],
         "avg_ri": round(float(objective_summary["avg_ri"]), 6),
@@ -251,6 +291,7 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine, 4),
         "avg_prox_ratio": round(avg_prox, 6),
+        "avg_preprocess_alpha": round(avg_preprocess_alpha, 6),
         "avg_cone_margin": round(avg_cone_margin, 6),
         "avg_cone_cosine": round(avg_cone_cosine, 6),
     }
@@ -280,7 +321,7 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Cone-Aligned NFJD synthetic prototype benchmark.")
     parser.add_argument("--dataset", choices=["synthetic_regression", "highconflict_regression"], default="highconflict_regression")
-    parser.add_argument("--methods", nargs="+", default=["nfjd_cone_basis", "nfjd", "fedjd", "fmgda", "weighted_sum", "direction_avg", "fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"])
+    parser.add_argument("--methods", nargs="+", default=["nfjd_common_safe", "nfjd", "nfjd_fast", "fedjd", "fmgda", "weighted_sum", "direction_avg", "fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[7, 42, 123])
     parser.add_argument("--m", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=30)
@@ -293,6 +334,12 @@ def parse_args():
     parser.add_argument("--cone-reference-mode", choices=["delta", "validation_gradient", "probe_basis"], default="delta")
     parser.add_argument("--cone-align-positive-only", action="store_true")
     parser.add_argument("--cone-basis-size", type=int, default=2)
+    parser.add_argument("--public-preprocess-alphas", nargs="+", type=float, default=[0.1])
+    parser.add_argument("--public-preprocess-mode", choices=["common_safe_ray"], default="common_safe_ray")
+    parser.add_argument("--public-preprocess-positive-only", action="store_true")
+    parser.add_argument("--public-preprocess-center-mode", choices=["mean", "trimmed_mean", "geometric_median"], default="mean")
+    parser.add_argument("--public-preprocess-trim-k", type=int, default=1)
+    parser.add_argument("--public-preprocess-adaptive-mode", choices=["fixed", "cosine"], default="fixed")
     parser.add_argument("--output-name", default="cone_prototype_results.csv")
     return parser.parse_args()
 
@@ -302,25 +349,33 @@ def main():
     rows = []
     experiments = []
     for method in args.methods:
-        alphas = args.cone_align_alphas if method in {"nfjd_cone", "nfjd_cone_basis"} else [0.0]
-        for alpha in alphas:
-            for seed in args.seeds:
-                experiments.append(dict(
-                    method=method,
-                    dataset=args.dataset,
-                    seed=seed,
-                    m=args.m,
-                    num_rounds=args.rounds,
-                    num_clients=args.num_clients,
-                    participation_rate=args.participation_rate,
-                    learning_rate=args.learning_rate,
-                    local_epochs=args.local_epochs,
-                    conflict_strength=args.conflict_strength,
-                    cone_align_alpha=alpha,
-                    cone_reference_mode=args.cone_reference_mode,
-                    cone_align_positive_only=args.cone_align_positive_only,
-                    cone_basis_size=args.cone_basis_size,
-                ))
+        cone_alphas = args.cone_align_alphas if method in {"nfjd_cone", "nfjd_cone_basis"} else [0.0]
+        public_alphas = args.public_preprocess_alphas if method == "nfjd_common_safe" else [0.0]
+        for cone_alpha in cone_alphas:
+            for public_alpha in public_alphas:
+                for seed in args.seeds:
+                    experiments.append(dict(
+                        method=method,
+                        dataset=args.dataset,
+                        seed=seed,
+                        m=args.m,
+                        num_rounds=args.rounds,
+                        num_clients=args.num_clients,
+                        participation_rate=args.participation_rate,
+                        learning_rate=args.learning_rate,
+                        local_epochs=args.local_epochs,
+                        conflict_strength=args.conflict_strength,
+                        cone_align_alpha=cone_alpha,
+                        cone_reference_mode=args.cone_reference_mode,
+                        cone_align_positive_only=args.cone_align_positive_only,
+                        cone_basis_size=args.cone_basis_size,
+                        public_preprocess_alpha=public_alpha,
+                        public_preprocess_mode=args.public_preprocess_mode,
+                        public_preprocess_positive_only=args.public_preprocess_positive_only,
+                        public_preprocess_center_mode=args.public_preprocess_center_mode,
+                        public_preprocess_trim_k=args.public_preprocess_trim_k,
+                        public_preprocess_adaptive_mode=args.public_preprocess_adaptive_mode,
+                    ))
 
     logger.info("Starting Cone-Aligned NFJD prototype benchmark: %d experiments", len(experiments))
     for idx, exp in enumerate(experiments):

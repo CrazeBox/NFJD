@@ -206,6 +206,7 @@ class ClientResult:
     avg_cosine_sim: float = 0.0
     avg_prox_ratio: float = 0.0
     avg_scaffold_ratio: float = 0.0
+    avg_preprocess_alpha: float = 0.0
     avg_cone_margin: float = 0.0
     avg_cone_cosine: float = 0.0
     jacobian: torch.Tensor | None = None
@@ -312,11 +313,20 @@ class NFJDClient:
         objective_fn: ObjectiveFn,
         task_weights: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
+        direction, _ = self.probe_shared_geometry(model, objective_fn, task_weights=task_weights)
+        return direction
+
+    def probe_shared_geometry(
+        self,
+        model: nn.Module,
+        objective_fn: ObjectiveFn,
+        task_weights: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
         try:
             batch_inputs, batch_targets = next(iter(loader))
         except StopIteration:
-            return None
+            return None, None
 
         batch_inputs = batch_inputs.to(self.device)
         batch_targets = batch_targets.to(self.device)
@@ -324,7 +334,7 @@ class NFJDClient:
 
         shared_params, _ = get_model_parameter_groups(model)
         if not shared_params:
-            return None
+            return None, None
 
         with torch.amp.autocast("cuda", enabled=self.use_mixed_precision):
             predictions = model(batch_inputs)
@@ -363,8 +373,8 @@ class NFJDClient:
         direction, _ = aggregator.solve(jacobian)
         dir_norm = torch.norm(direction, p=2)
         if dir_norm.item() <= 1e-12:
-            return None
-        return (direction / dir_norm).detach().clone()
+            return None, jacobian.detach().clone()
+        return (direction / dir_norm).detach().clone(), jacobian.detach().clone()
 
     def local_update(
         self,
@@ -372,6 +382,10 @@ class NFJDClient:
         objective_fn: ObjectiveFn,
         task_weights: torch.Tensor | None = None,
         shared_control_global: torch.Tensor | None = None,
+        shared_preprocess_direction: torch.Tensor | None = None,
+        preprocess_alpha: float = 0.0,
+        preprocess_positive_only: bool = False,
+        preprocess_adaptive_mode: str = "fixed",
         cone_reference_shared_direction: torch.Tensor | None = None,
         cone_reference_shared_basis: torch.Tensor | None = None,
         cone_align_alpha: float = 0.0,
@@ -393,6 +407,7 @@ class NFJDClient:
         cosine_history: list[float] = []
         prox_ratio_history: list[float] = []
         scaffold_ratio_history: list[float] = []
+        preprocess_alpha_history: list[float] = []
         cone_margin_history: list[float] = []
         cone_cosine_history: list[float] = []
         last_avg_cosine_sim = 0.0
@@ -405,6 +420,9 @@ class NFJDClient:
         scaffold_correction = None
         if shared_control_global is not None:
             scaffold_correction = shared_control_global.to(self.device, dtype=theta_init_shared.dtype) - self.shared_control_local.to(self.device, dtype=theta_init_shared.dtype)
+        preprocess_reference = None
+        if shared_preprocess_direction is not None:
+            preprocess_reference = shared_preprocess_direction.to(self.device)
         cone_reference = None
         if cone_reference_shared_direction is not None:
             cone_reference = cone_reference_shared_direction.to(self.device)
@@ -507,6 +525,30 @@ class NFJDClient:
                 return direction
             return (1.0 - cone_align_alpha) * direction + cone_align_alpha * cone_direction
 
+        def _apply_public_preprocess(direction: torch.Tensor, jacobian: torch.Tensor | None) -> torch.Tensor:
+            if preprocess_reference is None or preprocess_alpha <= 0 or jacobian is None or direction.numel() == 0:
+                return direction
+            ref_norm = torch.norm(preprocess_reference, p=2)
+            dir_norm = torch.norm(direction, p=2)
+            if ref_norm.item() <= 1e-12 or dir_norm.item() <= 1e-12:
+                return direction
+            ref_unit = preprocess_reference / ref_norm
+            margin = float(torch.min(jacobian @ ref_unit).item())
+            cone_margin_history.append(margin)
+            public_scaled = ref_unit.to(direction.device, dtype=direction.dtype) * dir_norm
+            cosine = torch.dot(direction, public_scaled) / (torch.norm(direction, p=2) * torch.norm(public_scaled, p=2) + 1e-12)
+            cone_cosine_history.append(float(cosine.item()))
+            if preprocess_positive_only and float(cosine.item()) <= 0.0:
+                preprocess_alpha_history.append(0.0)
+                return direction
+            if preprocess_adaptive_mode == "cosine":
+                effective_alpha = preprocess_alpha * max(float(cosine.item()), 0.0)
+            else:
+                effective_alpha = preprocess_alpha
+            effective_alpha = max(min(effective_alpha, 1.0), 0.0)
+            preprocess_alpha_history.append(effective_alpha)
+            return (1.0 - effective_alpha) * direction + effective_alpha * public_scaled
+
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
         for _ in range(self.local_epochs):
@@ -593,6 +635,7 @@ class NFJDClient:
                         rescale_factor = self.adaptive_rescaling.last_scale
                         last_rescale_factor = rescale_factor
 
+                    direction = _apply_public_preprocess(direction, jacobian)
                     if cone_basis is not None:
                         direction = _apply_cone_basis_alignment(direction, jacobian)
                     else:
@@ -622,6 +665,7 @@ class NFJDClient:
                         if self.adaptive_rescaling is not None:
                             direction = direction * last_rescale_factor
                         rescale_factor = last_rescale_factor
+                        direction = _apply_public_preprocess(direction, last_raw_jacobian)
                         if cone_basis is None:
                             direction = _reuse_last_projected_reference(direction)
                     else:
@@ -674,6 +718,7 @@ class NFJDClient:
                             rescale_factor = self.adaptive_rescaling.last_scale
                             last_rescale_factor = rescale_factor
 
+                        direction = _apply_public_preprocess(direction, jacobian)
                         if cone_basis is not None:
                             direction = _apply_cone_basis_alignment(direction, jacobian)
                         else:
@@ -712,6 +757,7 @@ class NFJDClient:
         avg_cosine_sim = sum(cosine_history) / len(cosine_history) if cosine_history else last_avg_cosine_sim
         avg_prox_ratio = sum(prox_ratio_history) / len(prox_ratio_history) if prox_ratio_history else 0.0
         avg_scaffold_ratio = sum(scaffold_ratio_history) / len(scaffold_ratio_history) if scaffold_ratio_history else 0.0
+        avg_preprocess_alpha = sum(preprocess_alpha_history) / len(preprocess_alpha_history) if preprocess_alpha_history else 0.0
         avg_cone_margin = sum(cone_margin_history) / len(cone_margin_history) if cone_margin_history else 0.0
         avg_cone_cosine = sum(cone_cosine_history) / len(cone_cosine_history) if cone_cosine_history else 0.0
 
@@ -729,6 +775,7 @@ class NFJDClient:
             avg_cosine_sim=avg_cosine_sim,
             avg_prox_ratio=avg_prox_ratio,
             avg_scaffold_ratio=avg_scaffold_ratio,
+            avg_preprocess_alpha=avg_preprocess_alpha,
             avg_cone_margin=avg_cone_margin,
             avg_cone_cosine=avg_cone_cosine,
             jacobian=last_raw_jacobian.detach().clone() if last_raw_jacobian is not None else None,

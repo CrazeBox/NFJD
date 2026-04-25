@@ -31,10 +31,15 @@ def main():
             row.get("cone_align_alpha", ""),
             row.get("cone_reference_mode", ""),
             row.get("cone_basis_size", ""),
+            row.get("public_preprocess_alpha", ""),
+            row.get("public_preprocess_mode", ""),
+            row.get("public_preprocess_center_mode", ""),
+            row.get("public_preprocess_trim_k", ""),
+            row.get("public_preprocess_adaptive_mode", ""),
         )].append(row)
 
     summary = []
-    for (dataset, method, alpha, reference_mode, basis_size), group in grouped.items():
+    for (dataset, method, alpha, reference_mode, basis_size, public_alpha, public_mode, public_center_mode, public_trim_k, public_adaptive_mode), group in grouped.items():
         ri = [_to_float(r["avg_ri"]) for r in group]
         jfi = [_to_float(r["task_jfi"]) for r in group]
         time_s = [_to_float(r["elapsed_time"]) for r in group]
@@ -46,6 +51,11 @@ def main():
             "alpha": alpha,
             "reference_mode": reference_mode,
             "basis_size": basis_size,
+            "public_alpha": public_alpha,
+            "public_mode": public_mode,
+            "public_center_mode": public_center_mode,
+            "public_trim_k": public_trim_k,
+            "public_adaptive_mode": public_adaptive_mode,
             "ri_mean": mean(ri),
             "ri_std": pstdev(ri) if len(ri) > 1 else 0.0,
             "jfi_mean": mean(jfi),
@@ -55,7 +65,7 @@ def main():
             "runs": len(group),
         })
 
-    columns = ["dataset", "method", "alpha", "reference_mode", "basis_size", "ri_mean", "ri_std", "jfi_mean", "time_mean", "cone_margin_mean", "cone_cosine_mean", "runs"]
+    columns = ["dataset", "method", "alpha", "reference_mode", "basis_size", "public_alpha", "public_mode", "public_center_mode", "public_trim_k", "public_adaptive_mode", "ri_mean", "ri_std", "jfi_mean", "time_mean", "cone_margin_mean", "cone_cosine_mean", "runs"]
     widths = {col: len(col) for col in columns}
     formatted = []
     for row in summary:

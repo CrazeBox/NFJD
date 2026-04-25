@@ -33,7 +33,7 @@ class NFJDTrainer:
             obj_str = ", ".join(f"{v:.4f}" for v in stats.objective_values)
             logger.info(
                 "Round %d | sampled=%s | obj=[%s] | ||Δθ||=%.4f | ||v||=%.4f | "
-                "scale=%.2f | prox=%.4f | scaffold=%.4f | cone=(%.4f, %.4f) | q=%s | time=%.3fs | upload=%d B",
+                "scale=%.2f | prox=%.4f | scaffold=%.4f | pre_a=%.4f | cone=(%.4f, %.4f) | q=%s | time=%.3fs | upload=%d B",
                 round_idx,
                 stats.sampled_client_ids,
                 obj_str,
@@ -42,6 +42,7 @@ class NFJDTrainer:
                 stats.avg_rescale_factor,
                 stats.avg_prox_ratio,
                 stats.avg_scaffold_ratio,
+                stats.avg_preprocess_alpha,
                 stats.avg_cone_margin,
                 stats.avg_cone_cosine,
                 [round(v, 3) for v in stats.task_weights],
@@ -62,7 +63,7 @@ class NFJDTrainer:
             "delta_norm", "global_momentum_norm", "round_time",
             "upload_bytes", "download_bytes", "client_compute_time",
             "aggregation_time", "update_time", "avg_rescale_factor",
-            "avg_local_epochs", "avg_prox_ratio", "avg_scaffold_ratio", "avg_cone_margin", "avg_cone_cosine", "task_weights", "task_weight_gap", "method_name",
+            "avg_local_epochs", "avg_prox_ratio", "avg_scaffold_ratio", "avg_preprocess_alpha", "avg_cone_margin", "avg_cone_cosine", "task_weights", "task_weight_gap", "method_name",
         ]
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -84,6 +85,7 @@ class NFJDTrainer:
                     "avg_local_epochs": s.avg_local_epochs,
                     "avg_prox_ratio": round(s.avg_prox_ratio, 6),
                     "avg_scaffold_ratio": round(s.avg_scaffold_ratio, 6),
+                    "avg_preprocess_alpha": round(s.avg_preprocess_alpha, 6),
                     "avg_cone_margin": round(s.avg_cone_margin, 6),
                     "avg_cone_cosine": round(s.avg_cone_cosine, 6),
                     "task_weights": str([round(v, 6) for v in s.task_weights]),
@@ -111,5 +113,6 @@ class NFJDTrainer:
             f.write(f"- Avg rescale factor: {sum(s.avg_rescale_factor for s in history)/len(history):.4f}\n")
             f.write(f"- Avg prox ratio: {sum(s.avg_prox_ratio for s in history)/len(history):.6f}\n")
             f.write(f"- Avg scaffold ratio: {sum(s.avg_scaffold_ratio for s in history)/len(history):.6f}\n")
+            f.write(f"- Avg preprocess alpha: {sum(s.avg_preprocess_alpha for s in history)/len(history):.6f}\n")
             f.write(f"- Avg cone margin: {sum(s.avg_cone_margin for s in history)/len(history):.6f}\n")
             f.write(f"- Avg cone cosine: {sum(s.avg_cone_cosine for s in history)/len(history):.6f}\n")
