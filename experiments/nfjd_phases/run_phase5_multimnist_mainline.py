@@ -15,7 +15,6 @@ from fedjd.experiments.nfjd_phases.phase5_utils import (
     cleanup,
     evaluate_model,
     fill_classification_metrics,
-    NFJD_VARIANT_CONFIGS,
     run_experiment,
     write_csv,
 )
@@ -23,48 +22,31 @@ from fedjd.models.lenet_mtl import LeNetMTL
 from fedjd.problems import multi_task_classification
 
 
-RESULTS_DIR = Path("results/nfjd_phase5/multimnist_component_ablation")
+RESULTS_DIR = Path("results/nfjd_phase5/multimnist_mainline")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler(RESULTS_DIR / "p5_multimnist_component_ablation.log", mode="w"),
+        logging.FileHandler(RESULTS_DIR / "p5_multimnist_mainline.log", mode="w"),
         logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEEDS = [7, 42, 123]
-DEFAULT_METHODS = [
-    "nfjd",
-    "nfjd_cached",
-    "nfjd_momentum",
-    "nfjd_rescale",
-    "nfjd_softweight",
-    "nfjd_fedprox_shared",
-    "nfjd_scaffold_shared",
-    "nfjd_hybrid",
-    "nfjd_fast",
-    "fedavg_cagrad",
-]
+DEFAULT_METHODS = ["nfjd_scaffold_shared", "nfjd_fast", "nfjd", "fedavg_cagrad"]
 
 
-def run_multimnist_component(method, seed, iid=True, num_rounds=50,
-                             num_clients=10, participation_rate=0.5,
-                             learning_rate=0.001, shared_prox_mu=None):
+def run_multimnist_mainline(method, seed, iid=False, num_rounds=50,
+                            num_clients=10, participation_rate=0.5,
+                            learning_rate=0.001):
     split_name = "iid" if iid else "noniid"
-    suffix = "" if shared_prox_mu is None else f"-mu{shared_prox_mu:g}"
-    exp_id = f"P5-mm-comp-{method}-{split_name}{suffix}-seed{seed}"
+    exp_id = f"P5-mm-main-{method}-{split_name}-seed{seed}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     random.seed(seed)
-
-    if shared_prox_mu is not None:
-        if method != "nfjd_fedprox_shared":
-            raise ValueError("shared_prox_mu override is only supported for nfjd_fedprox_shared.")
-        NFJD_VARIANT_CONFIGS[method]["shared_prox_mu"] = float(shared_prox_mu)
 
     data = make_multimnist(num_clients=num_clients, iid=iid, seed=seed)
     model = LeNetMTL(input_channels=1, num_tasks=2, num_classes=10)
@@ -93,12 +75,11 @@ def run_multimnist_component(method, seed, iid=True, num_rounds=50,
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run MultiMNIST NFJD component ablations.")
+    parser = argparse.ArgumentParser(description="Run MultiMNIST mainline NFJD comparisons.")
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
     parser.add_argument("--seeds", nargs="+", type=int, default=DEFAULT_SEEDS)
-    parser.add_argument("--splits", nargs="+", choices=["iid", "noniid"], default=["noniid", "iid"])
+    parser.add_argument("--splits", nargs="+", choices=["iid", "noniid"], default=["noniid"])
     parser.add_argument("--rounds", type=int, default=50)
-    parser.add_argument("--shared-prox-mus", nargs="+", type=float, default=[])
     return parser.parse_args()
 
 
@@ -109,24 +90,22 @@ def main():
     for split in args.splits:
         iid = split == "iid"
         for method in args.methods:
-            prox_values = args.shared_prox_mus if (method == "nfjd_fedprox_shared" and args.shared_prox_mus) else [None]
-            for prox_mu in prox_values:
-                for seed in args.seeds:
-                    experiments.append(dict(method=method, seed=seed, iid=iid, num_rounds=args.rounds, shared_prox_mu=prox_mu))
+            for seed in args.seeds:
+                experiments.append(dict(method=method, seed=seed, iid=iid, num_rounds=args.rounds))
 
-    logger.info("Starting MultiMNIST component ablation: %d experiments", len(experiments))
+    logger.info("Starting MultiMNIST mainline run: %d experiments", len(experiments))
     for idx, exp in enumerate(experiments):
         logger.info("[%d/%d] Running %s", idx + 1, len(experiments), exp)
         try:
-            rows.append(run_multimnist_component(**exp))
+            rows.append(run_multimnist_mainline(**exp))
         except Exception as exc:
             logger.exception("Experiment failed: %s", exc)
         finally:
             cleanup()
 
-    csv_path = RESULTS_DIR / "phase5_multimnist_component_ablation.csv"
+    csv_path = RESULTS_DIR / "phase5_multimnist_mainline.csv"
     write_csv(csv_path, rows)
-    logger.info("MultiMNIST component ablation complete: %d/%d saved to %s", len(rows), len(experiments), csv_path)
+    logger.info("MultiMNIST mainline run complete: %d/%d saved to %s", len(rows), len(experiments), csv_path)
 
 
 if __name__ == "__main__":

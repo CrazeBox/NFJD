@@ -110,6 +110,15 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         official_repo="",
         implementation_note="Exact NFJD on shared parameters with an added shared-trunk proximal term toward the current global model, used to test whether client drift rather than task weighting is the main non-IID bottleneck.",
     ),
+    "nfjd_scaffold_shared": Phase5MethodSpec(
+        method="nfjd_scaffold_shared",
+        display_name="NFJD+SCAFFOLD(shared)",
+        family="proposed_mainline",
+        paper_title="NFJD with shared-trunk SCAFFOLD correction (this repository)",
+        paper_url="",
+        official_repo="",
+        implementation_note="Exact NFJD on shared parameters with shared-only control-variate correction; each task gradient row is corrected by the same shared SCAFFOLD term before local UPGrad, targeting client drift without changing head-specific updates.",
+    ),
     "fedavg_ls": Phase5MethodSpec(
         method="fedavg_ls",
         display_name="FedAvg+LS",

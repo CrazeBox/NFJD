@@ -191,6 +191,27 @@ NFJD_VARIANT_CONFIGS = {
         "local_momentum_beta": 0.0,
         "global_momentum_beta": 0.0,
         "shared_prox_mu": 0.001,
+        "use_shared_scaffold": False,
+        "conflict_aware_momentum": False,
+        "upload_align_scores": False,
+    },
+    "nfjd_scaffold_shared": {
+        "use_adaptive_rescaling": False,
+        "use_stochastic_gramian": False,
+        "stochastic_subset_size": None,
+        "recompute_interval": 1,
+        "exact_upgrad": True,
+        "use_objective_normalization": True,
+        "use_global_progress_weights": True,
+        "progress_beta": 2.0,
+        "progress_min_weight": 0.5,
+        "progress_max_weight": 2.0,
+        "progress_ema_beta": 0.0,
+        "progress_max_change": 0.0,
+        "local_momentum_beta": 0.0,
+        "global_momentum_beta": 0.0,
+        "shared_prox_mu": 0.0,
+        "use_shared_scaffold": True,
         "conflict_aware_momentum": False,
         "upload_align_scores": False,
     },
@@ -205,10 +226,11 @@ ALL_FIELDNAMES = [
     "progress_ema_beta", "progress_max_change", "stochastic_subset_size",
     "recompute_interval", "local_momentum_beta", "global_momentum_beta",
     "shared_prox_mu",
+    "use_shared_scaffold",
     "model_arch", "total_local_steps",
     "elapsed_time", "all_decreased", "avg_ri",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
-    "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_effective_beta",
+    "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_scaffold_ratio", "avg_effective_beta",
     "avg_task_weight_gap",
     "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
     "avg_mse", "max_mse", "mse_std",
@@ -241,6 +263,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             use_objective_normalization=cfg["use_objective_normalization"],
             upload_align_scores=cfg["upload_align_scores"],
             shared_prox_mu=cfg["shared_prox_mu"],
+            cone_align_positive_only=False,
         ) for i in range(num_clients)]
         server = NFJDServer(
             model=model, clients=clients, objective_fn=objective_fn,
@@ -255,6 +278,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             progress_ema_beta=cfg["progress_ema_beta"],
             progress_max_change=cfg["progress_max_change"],
             method_name=method,
+            use_shared_scaffold=cfg.get("use_shared_scaffold", False),
         )
         return NFJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -340,6 +364,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
     avg_rescale = 1.0
     avg_cosine_sim = 0.0
     avg_prox_ratio = 0.0
+    avg_scaffold_ratio = 0.0
     avg_effective_beta = 0.9
     avg_task_weight_gap = 0.0
     if method in NFJD_VARIANT_CONFIGS:
@@ -349,6 +374,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         avg_cosine_sim = sum(cosine_vals) / len(cosine_vals) if cosine_vals else 0.0
         prox_vals = [getattr(s, "avg_prox_ratio", 0.0) for s in history]
         avg_prox_ratio = sum(prox_vals) / len(prox_vals) if prox_vals else 0.0
+        scaffold_vals = [getattr(s, "avg_scaffold_ratio", 0.0) for s in history]
+        avg_scaffold_ratio = sum(scaffold_vals) / len(scaffold_vals) if scaffold_vals else 0.0
         beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
         avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
         weight_gap_vals = [getattr(s, "task_weight_gap", 0.0) for s in history]
@@ -380,6 +407,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "local_momentum_beta": nfjd_cfg["local_momentum_beta"] if nfjd_cfg else "",
         "global_momentum_beta": nfjd_cfg["global_momentum_beta"] if nfjd_cfg else "",
         "shared_prox_mu": nfjd_cfg["shared_prox_mu"] if nfjd_cfg else "",
+        "use_shared_scaffold": nfjd_cfg.get("use_shared_scaffold", False) if nfjd_cfg else False,
         "model_arch": model_arch,
         "total_local_steps": total_local_steps,
         "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
@@ -390,6 +418,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "avg_rescale_factor": round(avg_rescale, 4),
         "avg_cosine_sim": round(avg_cosine_sim, 4),
         "avg_prox_ratio": round(avg_prox_ratio, 6),
+        "avg_scaffold_ratio": round(avg_scaffold_ratio, 6),
         "avg_effective_beta": round(avg_effective_beta, 4),
         "avg_task_weight_gap": round(avg_task_weight_gap, 4),
         "avg_accuracy": "", "avg_f1": "", "task_jfi": "", "task_mmag": "",

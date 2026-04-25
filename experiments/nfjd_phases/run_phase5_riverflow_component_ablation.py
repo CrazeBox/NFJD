@@ -41,6 +41,7 @@ DEFAULT_METHODS = [
     "nfjd_cached",
     "nfjd_softweight",
     "nfjd_fedprox_shared",
+    "nfjd_scaffold_shared",
     "nfjd_hybrid",
     "nfjd_fast",
     "fedavg_cagrad",
