@@ -76,6 +76,9 @@ class NFJDServer:
         public_preprocess_center_mode: str = "mean",
         public_preprocess_trim_k: int = 0,
         public_preprocess_adaptive_mode: str = "fixed",
+        public_preprocess_recompute_interval: int = 1,
+        public_preprocess_probe_batch_size: int | None = None,
+        public_preprocess_steps: int = 0,
     ) -> None:
         self.model = model.to(device)
         self.clients = clients
@@ -108,6 +111,9 @@ class NFJDServer:
         self.public_preprocess_center_mode = public_preprocess_center_mode
         self.public_preprocess_trim_k = max(int(public_preprocess_trim_k), 0)
         self.public_preprocess_adaptive_mode = public_preprocess_adaptive_mode
+        self.public_preprocess_recompute_interval = max(int(public_preprocess_recompute_interval), 1)
+        self.public_preprocess_probe_batch_size = public_preprocess_probe_batch_size
+        self.public_preprocess_steps = max(int(public_preprocess_steps), 0)
         self.initial_objectives: list[float] | None = None
         self.previous_objectives: list[float] | None = None
         self.task_weights: torch.Tensor | None = None
@@ -255,7 +261,12 @@ class NFJDServer:
         probe_jacobians = []
         for client in sampled_clients:
             model_clone = self._clone_model()
-            probe_direction, probe_jacobian = client.probe_shared_geometry(model_clone, self.objective_fn, task_weights=task_weights)
+            probe_direction, probe_jacobian = client.probe_shared_geometry(
+                model_clone,
+                self.objective_fn,
+                task_weights=task_weights,
+                probe_batch_size=self.public_preprocess_probe_batch_size,
+            )
             if probe_direction is not None:
                 probe_directions.append((probe_direction.to(self.device), client.num_examples / total_examples))
             if probe_jacobian is not None:
@@ -379,9 +390,15 @@ class NFJDServer:
         sampled_clients = self.sample_clients()
         total_examples = sum(client.num_examples for client in sampled_clients)
         task_weights = self._compute_task_weights()
-        self.shared_preprocess_direction = None
         if self.public_preprocess_alpha > 0 and self.public_preprocess_mode == "common_safe_ray":
-            self.shared_preprocess_direction = self._compute_common_safe_ray(sampled_clients, task_weights, total_examples)
+            should_recompute_public = (
+                self.shared_preprocess_direction is None
+                or round_idx % self.public_preprocess_recompute_interval == 0
+            )
+            if should_recompute_public:
+                self.shared_preprocess_direction = self._compute_common_safe_ray(sampled_clients, task_weights, total_examples)
+        else:
+            self.shared_preprocess_direction = None
         if self.cone_align_alpha > 0 and self.cone_reference_mode == "validation_gradient":
             self.shared_direction_reference = self._compute_validation_shared_reference()
             self.shared_direction_basis = None
@@ -423,6 +440,7 @@ class NFJDServer:
                 preprocess_alpha=self.public_preprocess_alpha,
                 preprocess_positive_only=self.public_preprocess_positive_only,
                 preprocess_adaptive_mode=self.public_preprocess_adaptive_mode,
+                preprocess_max_steps=self.public_preprocess_steps,
                 cone_reference_shared_direction=self.shared_direction_reference,
                 cone_reference_shared_basis=self.shared_direction_basis,
                 cone_align_alpha=self.cone_align_alpha,

@@ -16,7 +16,8 @@ from fedjd.core import (
     DirectionAvgServer, FMGDAClient, FedJDClient, FedJDServer, FedJDTrainer,
     FMGDAServer, NFJDClient, NFJDServer, NFJDTrainer, WeightedSumServer,
 )
-from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_round_history
+from fedjd.experiments.nfjd_phases.phase5_utils import evaluate_model, fill_regression_metrics
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
 from fedjd.models import MediumRegressor, SmallRegressor
 from fedjd.problems import multi_objective_regression
@@ -31,13 +32,10 @@ ALL_FIELDNAMES = [
     "exp_id", "method", "dataset", "m", "seed", "num_rounds", "num_clients",
     "participation_rate", "learning_rate", "conflict_strength",
     "model_size", "local_epochs", "use_adaptive_rescaling",
-    "use_stochastic_gramian", "elapsed_time", "all_decreased",
-    "hypervolume", "pareto_gap", "task_jfi", "task_mmag", "avg_relative_improvement", "avg_ri",
-    "avg_upload_bytes", "avg_round_time", "upload_per_client", "avg_rescale_factor",
+    "use_stochastic_gramian", "elapsed_time",
+    "avg_upload_bytes", "avg_round_time", "upload_per_client",
+    "avg_mse", "max_mse", "mse_std", "avg_r2",
 ]
-MAX_M = 10
-for i in range(MAX_M):
-    ALL_FIELDNAMES.extend([f"init_obj_{i}", f"final_obj_{i}", f"delta_obj_{i}"])
 
 
 def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
@@ -99,23 +97,13 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         raise ValueError(f"Unknown method: {method}")
 
     start = time.time()
-    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
-
-    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
-    final_obj = objective_summary["final_obj"]
-    avg_ri = float(objective_summary["avg_ri"])
-    all_decreased = bool(objective_summary["all_decreased"])
     round_summary = summarize_round_history(history)
     avg_upload = round_summary["avg_upload_bytes"]
     avg_round_time = round_summary["avg_round_time"]
     upload_per_client = round_summary["upload_per_client"]
-
-    avg_rescale = 1.0
-    if method == "nfjd":
-        rescale_vals = [s.avg_rescale_factor for s in history]
-        avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
+    predictions, targets = evaluate_model(trainer.server.model, fed_data.test_dataset, device, batch_size=256)
 
     row = {
         "exp_id": exp_id, "method": method, "dataset": dataset, "m": m, "seed": seed,
@@ -125,30 +113,16 @@ def _run_single(method, dataset, m, seed, conflict_strength=0.0, num_rounds=50,
         "model_size": model_size, "local_epochs": local_epochs if method in ("nfjd", "fmgda") else 1,
         "use_adaptive_rescaling": False,
         "use_stochastic_gramian": False,
-        "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
-        "hypervolume": round(float(objective_summary["hypervolume"]), 6),
-        "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),
-        "task_jfi": round(float(objective_summary["task_jfi"]), 6),
-        "task_mmag": round(float(objective_summary["task_mmag"]), 6),
-        "avg_relative_improvement": round(avg_ri, 6),
-        "avg_ri": round(avg_ri, 6),
+        "elapsed_time": round(elapsed, 2),
         "avg_upload_bytes": round(avg_upload, 0),
         "avg_round_time": round(avg_round_time, 4),
         "upload_per_client": round(upload_per_client, 0),
-        "avg_rescale_factor": round(avg_rescale, 4),
+        "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
     }
-    for i in range(MAX_M):
-        if i < m:
-            row[f"init_obj_{i}"] = round(initial_obj[i], 6)
-            row[f"final_obj_{i}"] = round(final_obj[i], 6)
-            row[f"delta_obj_{i}"] = round(final_obj[i] - initial_obj[i], 6)
-        else:
-            row[f"init_obj_{i}"] = ""
-            row[f"final_obj_{i}"] = ""
-            row[f"delta_obj_{i}"] = ""
+    row = fill_regression_metrics(row, predictions, targets, m)
 
-    logger.info("[%s] %s: RI=%.4f JFI=%.4f upload/client=%d rescale=%.2f",
-                exp_id, method, avg_ri, float(objective_summary["task_jfi"]), upload_per_client, avg_rescale)
+    logger.info("[%s] %s: MSE=%.6f maxMSE=%.6f R2=%.6f time=%.1fs",
+                exp_id, method, float(row["avg_mse"]), float(row["max_mse"]), float(row["avg_r2"]), elapsed)
     return row
 
 

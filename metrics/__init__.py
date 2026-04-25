@@ -88,6 +88,32 @@ def compute_mse_per_task(predictions: torch.Tensor, targets: torch.Tensor, num_t
     return mse_list
 
 
+def compute_mae_per_task(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    mae_list = []
+    with torch.no_grad():
+        for t in range(num_tasks):
+            mae = (predictions[:, t] - targets[:, t]).abs().mean().item()
+            mae_list.append(mae)
+    return mae_list
+
+
+def compute_r2_per_task(predictions: torch.Tensor, targets: torch.Tensor, num_tasks: int) -> list[float]:
+    r2_list = []
+    with torch.no_grad():
+        for t in range(num_tasks):
+            y_true = targets[:, t]
+            y_pred = predictions[:, t]
+            ss_res = ((y_true - y_pred) ** 2).sum().item()
+            mean_true = y_true.mean().item()
+            ss_tot = ((y_true - mean_true) ** 2).sum().item()
+            if ss_tot <= 1e-12:
+                r2 = 1.0 if ss_res <= 1e-12 else 0.0
+            else:
+                r2 = 1.0 - (ss_res / ss_tot)
+            r2_list.append(float(r2))
+    return r2_list
+
+
 def hypervolume_2d(points: list[tuple[float, float]], reference: tuple[float, float]) -> float:
     if not points:
         return 0.0

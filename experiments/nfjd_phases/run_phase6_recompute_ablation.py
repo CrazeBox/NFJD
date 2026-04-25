@@ -18,7 +18,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_synthetic_federated_regression, make_high_conflict_federated_regression
-from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history
+from fedjd.experiments.nfjd_phases.phase5_utils import evaluate_model, fill_regression_metrics
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -37,12 +37,8 @@ logger = logging.getLogger(__name__)
 
 ALL_FIELDNAMES = [
     "exp_id", "recompute_interval", "dataset", "m", "seed", "num_rounds",
-    "elapsed_time", "all_decreased", "hypervolume", "pareto_gap",
-    "task_jfi", "task_mmag", "avg_relative_improvement", "avg_ri", "avg_round_time",
+    "elapsed_time", "avg_round_time", "avg_mse", "max_mse", "mse_std", "avg_r2",
 ]
-MAX_M = 10
-for i in range(MAX_M):
-    ALL_FIELDNAMES.extend([f"init_obj_{i}", f"final_obj_{i}", f"delta_obj_{i}"])
 
 
 def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
@@ -83,16 +79,11 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
     trainer = NFJDTrainer(server=server, num_rounds=num_rounds)
 
     start = time.time()
-    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
 
-    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
-    final_obj = objective_summary["final_obj"]
-    all_decreased = bool(objective_summary["all_decreased"])
-    avg_ri = float(objective_summary["avg_ri"])
-
     avg_round_time = sum(s.round_time for s in history) / max(len(history), 1)
+    predictions, targets = evaluate_model(trainer.server.model, fed_data.test_dataset, device, batch_size=256)
 
     row = {
         "exp_id": exp_id,
@@ -102,29 +93,14 @@ def _run_single(recompute_interval, dataset, m, seed, num_rounds=50,
         "seed": seed,
         "num_rounds": num_rounds,
         "elapsed_time": round(elapsed, 2),
-        "all_decreased": all_decreased,
-        "hypervolume": round(float(objective_summary["hypervolume"]), 6),
-        "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),
-        "task_jfi": round(float(objective_summary["task_jfi"]), 6),
-        "task_mmag": round(float(objective_summary["task_mmag"]), 6),
-        "avg_relative_improvement": round(avg_ri, 6),
-        "avg_ri": round(avg_ri, 6),
         "avg_round_time": round(avg_round_time, 4),
+        "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
     }
-    for i in range(MAX_M):
-        if i < m:
-            row[f"init_obj_{i}"] = round(initial_obj[i], 6)
-            row[f"final_obj_{i}"] = round(final_obj[i], 6)
-            row[f"delta_obj_{i}"] = round(final_obj[i] - initial_obj[i], 6)
-        else:
-            row[f"init_obj_{i}"] = ""
-            row[f"final_obj_{i}"] = ""
-            row[f"delta_obj_{i}"] = ""
+    row = fill_regression_metrics(row, predictions, targets, m)
 
-    speedup = 1.0
     logger.info(
-        "[%s] RI=%.4f JFI=%.4f time=%.1fs round_time=%.4fs",
-        exp_id, avg_ri, float(objective_summary["task_jfi"]), elapsed, avg_round_time,
+        "[%s] MSE=%.6f maxMSE=%.6f R2=%.6f time=%.1fs round_time=%.4fs",
+        exp_id, float(row["avg_mse"]), float(row["max_mse"]), float(row["avg_r2"]), elapsed, avg_round_time,
     )
     return row
 
@@ -182,16 +158,15 @@ def main():
         ri_rows = [r for r in all_rows if r["recompute_interval"] == ri]
         if not ri_rows:
             continue
-        avg_ri = sum(r["avg_ri"] for r in ri_rows) / len(ri_rows)
-        avg_jfi = sum(r["hypervolume"] for r in ri_rows) / len(ri_rows)
+        avg_mse = sum(r["avg_mse"] for r in ri_rows) / len(ri_rows)
+        max_mse = sum(r["max_mse"] for r in ri_rows) / len(ri_rows)
+        avg_r2 = sum(r["avg_r2"] for r in ri_rows) / len(ri_rows)
         avg_time = sum(r["elapsed_time"] for r in ri_rows) / len(ri_rows)
         avg_rt = sum(r["avg_round_time"] for r in ri_rows) / len(ri_rows)
-        all_decr_pct = sum(1 for r in ri_rows if r["all_decreased"]) / len(ri_rows)
         speedup = avg_time / (sum(r["elapsed_time"] for r in all_rows if r["recompute_interval"] == 1) / len([r for r in all_rows if r["recompute_interval"] == 1])) if ri != 1 else 1.0
         logger.info(
-            f"RI={ri:2d}: avg_RI={avg_ri:.4f}, avg_JFI={avg_jfi:.4f}, "
-            f"avg_time={avg_time:.1f}s, avg_round={avg_rt:.4f}s, "
-            f"all_decr={all_decr_pct:.0%}, speedup={1.0 if ri == 1 else avg_time / (sum(r['elapsed_time'] for r in all_rows if r['recompute_interval'] == 1) / max(len([r for r in all_rows if r['recompute_interval'] == 1]), 1)):.2f}x"
+            f"recompute={ri:2d}: avg_MSE={avg_mse:.6f}, max_MSE={max_mse:.6f}, avg_R2={avg_r2:.6f}, "
+            f"avg_time={avg_time:.1f}s, avg_round={avg_rt:.4f}s, speedup={1.0 if ri == 1 else avg_time / (sum(r['elapsed_time'] for r in all_rows if r['recompute_interval'] == 1) / max(len([r for r in all_rows if r['recompute_interval'] == 1]), 1)):.2f}x"
         )
 
     logger.info(f"\nPhase 6 complete! {len(all_rows)}/{total} experiments, saved to {csv_path}")

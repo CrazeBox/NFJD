@@ -321,8 +321,9 @@ class NFJDClient:
         model: nn.Module,
         objective_fn: ObjectiveFn,
         task_weights: torch.Tensor | None = None,
+        probe_batch_size: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+        loader = DataLoader(self.dataset, batch_size=probe_batch_size or self.batch_size, shuffle=True)
         try:
             batch_inputs, batch_targets = next(iter(loader))
         except StopIteration:
@@ -386,6 +387,7 @@ class NFJDClient:
         preprocess_alpha: float = 0.0,
         preprocess_positive_only: bool = False,
         preprocess_adaptive_mode: str = "fixed",
+        preprocess_max_steps: int = 0,
         cone_reference_shared_direction: torch.Tensor | None = None,
         cone_reference_shared_basis: torch.Tensor | None = None,
         cone_align_alpha: float = 0.0,
@@ -527,6 +529,8 @@ class NFJDClient:
 
         def _apply_public_preprocess(direction: torch.Tensor, jacobian: torch.Tensor | None) -> torch.Tensor:
             if preprocess_reference is None or preprocess_alpha <= 0 or jacobian is None or direction.numel() == 0:
+                return direction
+            if preprocess_max_steps > 0 and step_idx >= preprocess_max_steps:
                 return direction
             ref_norm = torch.norm(preprocess_reference, p=2)
             dir_norm = torch.norm(direction, p=2)

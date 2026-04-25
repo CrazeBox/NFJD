@@ -40,11 +40,11 @@ def main():
 
     summary = []
     for (dataset, method, alpha, reference_mode, basis_size, public_alpha, public_mode, public_center_mode, public_trim_k, public_adaptive_mode), group in grouped.items():
-        ri = [_to_float(r["avg_ri"]) for r in group]
-        jfi = [_to_float(r["task_jfi"]) for r in group]
+        mse = [_to_float(r["avg_mse"]) for r in group]
+        max_mse = [_to_float(r["max_mse"]) for r in group]
+        mse_std = [_to_float(r["mse_std"]) for r in group]
+        r2 = [_to_float(r["avg_r2"]) for r in group]
         time_s = [_to_float(r["elapsed_time"]) for r in group]
-        cone_margin = [_to_float(r.get("avg_cone_margin", "0")) for r in group]
-        cone_cosine = [_to_float(r.get("avg_cone_cosine", "0")) for r in group]
         summary.append({
             "dataset": dataset,
             "method": method,
@@ -56,16 +56,16 @@ def main():
             "public_center_mode": public_center_mode,
             "public_trim_k": public_trim_k,
             "public_adaptive_mode": public_adaptive_mode,
-            "ri_mean": mean(ri),
-            "ri_std": pstdev(ri) if len(ri) > 1 else 0.0,
-            "jfi_mean": mean(jfi),
+            "avg_mse_mean": mean(mse),
+            "avg_mse_std": pstdev(mse) if len(mse) > 1 else 0.0,
+            "max_mse_mean": mean(max_mse),
+            "mse_std_mean": mean(mse_std),
+            "avg_r2_mean": mean(r2),
             "time_mean": mean(time_s),
-            "cone_margin_mean": mean(cone_margin),
-            "cone_cosine_mean": mean(cone_cosine),
             "runs": len(group),
         })
 
-    columns = ["dataset", "method", "alpha", "reference_mode", "basis_size", "public_alpha", "public_mode", "public_center_mode", "public_trim_k", "public_adaptive_mode", "ri_mean", "ri_std", "jfi_mean", "time_mean", "cone_margin_mean", "cone_cosine_mean", "runs"]
+    columns = ["dataset", "method", "alpha", "reference_mode", "basis_size", "public_alpha", "public_mode", "public_center_mode", "public_trim_k", "public_adaptive_mode", "avg_mse_mean", "avg_mse_std", "max_mse_mean", "mse_std_mean", "avg_r2_mean", "time_mean", "runs"]
     widths = {col: len(col) for col in columns}
     formatted = []
     for row in summary:

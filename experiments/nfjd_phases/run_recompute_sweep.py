@@ -13,7 +13,7 @@ import torch
 
 from fedjd.core import NFJDClient, NFJDServer, NFJDTrainer
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
-from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history
+from fedjd.experiments.nfjd_phases.phase5_utils import evaluate_model, fill_regression_metrics
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
 
@@ -93,24 +93,22 @@ def run_one(
     trainer = NFJDTrainer(server=server, num_rounds=rounds)
 
     t0 = time.time()
-    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - t0
-
-    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
-    avg_ri = float(objective_summary["avg_ri"])
-    all_decreased = bool(objective_summary["all_decreased"])
     avg_round_time = sum(s.round_time for s in history) / max(len(history), 1)
+    predictions, targets = evaluate_model(trainer.server.model, data.test_dataset, device, batch_size=256)
+    row = {"avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": ""}
+    row = fill_regression_metrics(row, predictions, targets, num_objectives)
 
     return {
         "ri": recompute_interval,
         "conflict": conflict_strength,
         "m": num_objectives,
         "seed": seed,
-        "avg_ri": avg_ri,
-        "task_jfi": float(objective_summary["task_jfi"]),
-        "task_mmag": float(objective_summary["task_mmag"]),
-        "all_decr": all_decreased,
+        "avg_mse": float(row["avg_mse"]),
+        "max_mse": float(row["max_mse"]),
+        "mse_std": float(row["mse_std"]),
+        "avg_r2": float(row["avg_r2"]),
         "elapsed": elapsed,
         "avg_rt": avg_round_time,
     }
@@ -168,8 +166,8 @@ def main() -> None:
                         )
                         results.append(result)
                         log(
-                            f"  RI={result['avg_ri']:.4f} JFI={result['task_jfi']:.4f} "
-                            f"time={result['elapsed']:.1f}s round={result['avg_rt']:.3f}s decr={result['all_decr']}"
+                            f"  MSE={result['avg_mse']:.6f} maxMSE={result['max_mse']:.6f} R2={result['avg_r2']:.6f} "
+                            f"time={result['elapsed']:.1f}s round={result['avg_rt']:.3f}s"
                         )
                     except Exception as exc:
                         log(f"  FAILED: {exc}")
@@ -177,7 +175,7 @@ def main() -> None:
     log("\n" + "=" * 100)
     log("SUMMARY: Average metrics per recompute_interval")
     log("=" * 100)
-    log(f"{'RI':>3s} | {'avg_RI':>8s} | {'HV':>8s} | {'avg_rt(s)':>10s} | {'elapsed(s)':>11s} | {'decr%':>6s} | {'speedup':>8s}")
+    log(f"{'RI':>3s} | {'avg_MSE':>10s} | {'max_MSE':>10s} | {'avg_R2':>8s} | {'avg_rt(s)':>10s} | {'elapsed(s)':>11s} | {'speedup':>8s}")
     log("-" * 100)
 
     base_elapsed = None
@@ -185,17 +183,17 @@ def main() -> None:
         rows = [r for r in results if r["ri"] == recompute_interval]
         if not rows:
             continue
-        avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-        avg_jfi = sum(r["task_jfi"] for r in rows) / len(rows)
+        avg_mse = sum(r["avg_mse"] for r in rows) / len(rows)
+        max_mse = sum(r["max_mse"] for r in rows) / len(rows)
+        avg_r2 = sum(r["avg_r2"] for r in rows) / len(rows)
         avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
         avg_elapsed = sum(r["elapsed"] for r in rows) / len(rows)
-        decr_pct = sum(1 for r in rows if r["all_decr"]) / len(rows)
         if recompute_interval == args.recompute_intervals[0]:
             base_elapsed = avg_elapsed
             speedup = 1.0
         else:
             speedup = (base_elapsed / avg_elapsed) if base_elapsed and avg_elapsed > 0 else 0.0
-        log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_jfi:>8.4f} | {avg_rt:>10.4f} | {avg_elapsed:>11.1f} | {decr_pct:>5.0%} | {speedup:>7.2f}x")
+        log(f"{recompute_interval:>3d} | {avg_mse:>10.6f} | {max_mse:>10.6f} | {avg_r2:>8.4f} | {avg_rt:>10.4f} | {avg_elapsed:>11.1f} | {speedup:>7.2f}x")
 
     log("\n" + "=" * 100)
     log("PER-SCENARIO BREAKDOWN")
@@ -203,22 +201,23 @@ def main() -> None:
     for num_objectives in args.m_values:
         for conflict_strength in args.conflicts:
             log(f"\nm={num_objectives}, conflict_strength={conflict_strength}")
-            log(f"{'RI':>3s} | {'avg_RI':>8s} | {'HV':>8s} | {'avg_rt(s)':>10s} | {'speedup':>8s}")
+            log(f"{'RI':>3s} | {'avg_MSE':>10s} | {'max_MSE':>10s} | {'avg_R2':>8s} | {'avg_rt(s)':>10s} | {'speedup':>8s}")
             log("-" * 70)
             base_rt = None
             for recompute_interval in args.recompute_intervals:
                 rows = [r for r in results if r["ri"] == recompute_interval and r["m"] == num_objectives and r["conflict"] == conflict_strength]
                 if not rows:
                     continue
-                avg_ri = sum(r["avg_ri"] for r in rows) / len(rows)
-                avg_jfi = sum(r["task_jfi"] for r in rows) / len(rows)
+                avg_mse = sum(r["avg_mse"] for r in rows) / len(rows)
+                max_mse = sum(r["max_mse"] for r in rows) / len(rows)
+                avg_r2 = sum(r["avg_r2"] for r in rows) / len(rows)
                 avg_rt = sum(r["avg_rt"] for r in rows) / len(rows)
                 if recompute_interval == args.recompute_intervals[0]:
                     base_rt = avg_rt
                     speedup = 1.0
                 else:
                     speedup = (base_rt / avg_rt) if base_rt and avg_rt > 0 else 0.0
-                log(f"{recompute_interval:>3d} | {avg_ri:>8.4f} | {avg_jfi:>8.4f} | {avg_rt:>10.4f} | {speedup:>7.2f}x")
+                log(f"{recompute_interval:>3d} | {avg_mse:>10.6f} | {max_mse:>10.6f} | {avg_r2:>8.4f} | {avg_rt:>10.4f} | {speedup:>7.2f}x")
 
     log("\n" + "=" * 100)
     log("EXPLORATION COMPLETE")

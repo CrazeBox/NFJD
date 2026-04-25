@@ -26,22 +26,18 @@ def _summarize_classification(rows):
     for (split, method), group in grouped.items():
         acc = [_to_float(row["avg_accuracy"]) for row in group]
         f1 = [_to_float(row["avg_f1"]) for row in group]
-        ri = [_to_float(row["avg_ri"]) for row in group]
+        min_acc = [_to_float(row["min_task_acc"]) for row in group]
+        min_f1 = [_to_float(row["min_task_f1"]) for row in group]
         time_s = [_to_float(row["elapsed_time"]) for row in group]
-        weight_gap = [_to_float(row["avg_task_weight_gap"]) for row in group]
-        prox_ratio = [_to_float(row.get("avg_prox_ratio", "0")) for row in group]
-        prox_mu = [_to_float(row.get("shared_prox_mu", "0")) for row in group]
         out.append({
             "split": split,
             "method": method,
             "acc_mean": mean(acc),
             "acc_std": pstdev(acc) if len(acc) > 1 else 0.0,
             "f1_mean": mean(f1),
-            "ri_mean": mean(ri),
+            "min_acc_mean": mean(min_acc),
+            "min_f1_mean": mean(min_f1),
             "time_mean": mean(time_s),
-            "weight_gap_mean": mean(weight_gap),
-            "prox_mu_mean": mean(prox_mu),
-            "prox_ratio_mean": mean(prox_ratio),
             "runs": len(group),
         })
     return sorted(out, key=lambda x: (x["split"], -x["acc_mean"]))
@@ -54,10 +50,8 @@ def _summarize_regression(rows):
         mse = [_to_float(row["avg_mse"]) for row in group]
         max_mse = [_to_float(row["max_mse"]) for row in group]
         mse_std = [_to_float(row["mse_std"]) for row in group]
-        jfi = [_to_float(row["task_jfi"]) for row in group]
+        r2 = [_to_float(row["avg_r2"]) for row in group]
         time_s = [_to_float(row["elapsed_time"]) for row in group]
-        prox_ratio = [_to_float(row.get("avg_prox_ratio", "0")) for row in group]
-        prox_mu = [_to_float(row.get("shared_prox_mu", "0")) for row in group]
         out.append({
             "m": int(m),
             "split": split,
@@ -66,10 +60,8 @@ def _summarize_regression(rows):
             "mse_seed_std": pstdev(mse) if len(mse) > 1 else 0.0,
             "max_mse_mean": mean(max_mse),
             "mse_std_mean": mean(mse_std),
-            "jfi_mean": mean(jfi),
+            "r2_mean": mean(r2),
             "time_mean": mean(time_s),
-            "prox_mu_mean": mean(prox_mu),
-            "prox_ratio_mean": mean(prox_ratio),
             "runs": len(group),
         })
     return sorted(out, key=lambda x: (x["m"], x["split"], x["mse_mean"]))
@@ -109,10 +101,10 @@ def main():
     dataset = rows[0].get("dataset", "")
     if dataset == "multimnist":
         summary = _summarize_classification(rows)
-        _print_table(summary, ["split", "method", "acc_mean", "acc_std", "f1_mean", "ri_mean", "time_mean", "weight_gap_mean", "prox_mu_mean", "prox_ratio_mean", "runs"])
+        _print_table(summary, ["split", "method", "acc_mean", "acc_std", "f1_mean", "min_acc_mean", "min_f1_mean", "time_mean", "runs"])
     elif dataset == "riverflow":
         summary = _summarize_regression(rows)
-        _print_table(summary, ["m", "split", "method", "mse_mean", "mse_seed_std", "max_mse_mean", "mse_std_mean", "jfi_mean", "time_mean", "prox_mu_mean", "prox_ratio_mean", "runs"])
+        _print_table(summary, ["m", "split", "method", "mse_mean", "mse_seed_std", "max_mse_mean", "mse_std_mean", "r2_mean", "time_mean", "runs"])
     else:
         raise SystemExit(f"Unsupported dataset: {dataset}")
 

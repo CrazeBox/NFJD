@@ -28,7 +28,8 @@ from fedjd.core import (
     WeightedSumServer,
 )
 from fedjd.data import make_high_conflict_federated_regression, make_synthetic_federated_regression
-from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_round_history
+from fedjd.experiments.nfjd_phases.phase5_utils import evaluate_model, fill_regression_metrics
 from fedjd.experiments.nfjd_phases.phase5_utils import NFJD_VARIANT_CONFIGS, build_trainer as build_phase5_trainer
 from fedjd.models import SmallRegressor
 from fedjd.problems import multi_objective_regression
@@ -50,14 +51,10 @@ logger = logging.getLogger(__name__)
 FIELDNAMES = [
     "exp_id", "method", "dataset", "seed", "m", "num_rounds", "num_clients",
     "participation_rate", "learning_rate", "local_epochs", "conflict_strength",
-    "cone_align_alpha", "cone_reference_mode", "cone_basis_size", "cone_align_positive_only", "public_preprocess_alpha", "public_preprocess_mode", "public_preprocess_positive_only", "public_preprocess_center_mode", "public_preprocess_trim_k", "public_preprocess_adaptive_mode", "elapsed_time", "all_decreased", "avg_ri", "task_jfi",
-    "task_mmag", "hypervolume", "pareto_gap", "avg_upload_bytes", "avg_round_time",
-    "upload_per_client", "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_preprocess_alpha",
-    "avg_cone_margin", "avg_cone_cosine",
+    "cone_align_alpha", "cone_reference_mode", "cone_basis_size", "cone_align_positive_only", "public_preprocess_alpha", "public_preprocess_mode", "public_preprocess_positive_only", "public_preprocess_center_mode", "public_preprocess_trim_k", "public_preprocess_adaptive_mode", "elapsed_time",
+    "avg_upload_bytes", "avg_round_time", "upload_per_client",
+    "avg_mse", "max_mse", "mse_std", "avg_r2",
 ]
-MAX_M = 10
-for i in range(MAX_M):
-    FIELDNAMES.extend([f"init_obj_{i}", f"final_obj_{i}", f"delta_obj_{i}"])
 
 
 def _write_csv(rows, csv_path: Path) -> None:
@@ -242,19 +239,10 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
         raise ValueError(f"Unknown method: {method}")
 
     start = time.time()
-    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
-
-    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
-    final_obj = objective_summary["final_obj"]
     round_summary = summarize_round_history(history)
-    avg_rescale = sum(getattr(s, "avg_rescale_factor", 1.0) for s in history) / max(len(history), 1)
-    avg_cosine = sum(getattr(s, "avg_cosine_sim", 0.0) for s in history) / max(len(history), 1)
-    avg_prox = sum(getattr(s, "avg_prox_ratio", 0.0) for s in history) / max(len(history), 1)
-    avg_preprocess_alpha = sum(getattr(s, "avg_preprocess_alpha", 0.0) for s in history) / max(len(history), 1)
-    avg_cone_margin = sum(getattr(s, "avg_cone_margin", 0.0) for s in history) / max(len(history), 1)
-    avg_cone_cosine = sum(getattr(s, "avg_cone_cosine", 0.0) for s in history) / max(len(history), 1)
+    predictions, targets = evaluate_model(trainer.server.model, data.test_dataset, device, batch_size=256)
 
     row = {
         "exp_id": exp_id,
@@ -279,40 +267,23 @@ def _run_single(method: str, dataset: str, seed: int, m: int, num_rounds: int, n
         "public_preprocess_trim_k": public_preprocess_trim_k if method == "nfjd_common_safe" else "",
         "public_preprocess_adaptive_mode": public_preprocess_adaptive_mode if method == "nfjd_common_safe" else "",
         "elapsed_time": round(elapsed, 2),
-        "all_decreased": objective_summary["all_decreased"],
-        "avg_ri": round(float(objective_summary["avg_ri"]), 6),
-        "task_jfi": round(float(objective_summary["task_jfi"]), 6),
-        "task_mmag": round(float(objective_summary["task_mmag"]), 6),
-        "hypervolume": round(float(objective_summary["hypervolume"]), 6),
-        "pareto_gap": round(float(objective_summary["pareto_gap"]), 6),
         "avg_upload_bytes": round(float(round_summary["avg_upload_bytes"]), 0),
         "avg_round_time": round(float(round_summary["avg_round_time"]), 4),
         "upload_per_client": round(float(round_summary["upload_per_client"]), 0),
-        "avg_rescale_factor": round(avg_rescale, 4),
-        "avg_cosine_sim": round(avg_cosine, 4),
-        "avg_prox_ratio": round(avg_prox, 6),
-        "avg_preprocess_alpha": round(avg_preprocess_alpha, 6),
-        "avg_cone_margin": round(avg_cone_margin, 6),
-        "avg_cone_cosine": round(avg_cone_cosine, 6),
+        "avg_mse": "",
+        "max_mse": "",
+        "mse_std": "",
+        "avg_r2": "",
     }
-    for i in range(MAX_M):
-        if i < m:
-            row[f"init_obj_{i}"] = round(initial_obj[i], 6)
-            row[f"final_obj_{i}"] = round(final_obj[i], 6)
-            row[f"delta_obj_{i}"] = round(final_obj[i] - initial_obj[i], 6)
-        else:
-            row[f"init_obj_{i}"] = ""
-            row[f"final_obj_{i}"] = ""
-            row[f"delta_obj_{i}"] = ""
+    row = fill_regression_metrics(row, predictions, targets, data.num_objectives)
 
     logger.info(
-        "[%s] %s RI=%.4f JFI=%.4f cone=(%.4f, %.4f) time=%.1fs",
+        "[%s] %s MSE=%.6f maxMSE=%.6f R2=%.6f time=%.1fs",
         exp_id,
         method,
-        float(objective_summary["avg_ri"]),
-        float(objective_summary["task_jfi"]),
-        avg_cone_margin,
-        avg_cone_cosine,
+        float(row["avg_mse"]),
+        float(row["max_mse"]),
+        float(row["avg_r2"]),
         elapsed,
     )
     return row

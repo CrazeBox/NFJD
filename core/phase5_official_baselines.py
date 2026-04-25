@@ -119,6 +119,15 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         official_repo="",
         implementation_note="Exact NFJD on shared parameters with shared-only control-variate correction; each task gradient row is corrected by the same shared SCAFFOLD term before local UPGrad, targeting client drift without changing head-specific updates.",
     ),
+    "nfjd_common_safe": Phase5MethodSpec(
+        method="nfjd_common_safe",
+        display_name="NFJD-common-safe",
+        family="proposed_ablation",
+        paper_title="NFJD low-cost common-safe preprocessing variant (this repository)",
+        paper_url="",
+        official_repo="",
+        implementation_note="A low-cost NFJD variant that refreshes a public common-safe shared direction only every few rounds using one small probe batch per sampled client, caches that direction on the server, and mixes it only into the first few local shared-parameter steps before reverting to standard local NFJD.",
+    ),
     "fedavg_ls": Phase5MethodSpec(
         method="fedavg_ls",
         display_name="FedAvg+LS",

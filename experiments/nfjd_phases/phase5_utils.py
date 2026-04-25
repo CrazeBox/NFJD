@@ -14,10 +14,10 @@ from fedjd.core import (
     PHASE5_FORMAL_BASELINES, Phase5OfficialBaselineClient,
     Phase5OfficialBaselineServer, FedJDTrainer, get_phase5_method_spec,
 )
-from fedjd.experiments.nfjd_phases.metric_utils import summarize_objective_history, summarize_round_history
+from fedjd.experiments.nfjd_phases.metric_utils import summarize_round_history
 from fedjd.metrics import (
-    jain_fairness_index, min_max_gap, compute_f1_scores,
-    compute_accuracy, compute_mse_per_task,
+    compute_f1_scores,
+    compute_accuracy, compute_mse_per_task, compute_mae_per_task, compute_r2_per_task,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,34 @@ NFJD_VARIANT_CONFIGS = {
         "conflict_aware_momentum": False,
         "upload_align_scores": False,
     },
+    "nfjd_common_safe": {
+        "use_adaptive_rescaling": False,
+        "use_stochastic_gramian": False,
+        "stochastic_subset_size": None,
+        "recompute_interval": 1,
+        "exact_upgrad": True,
+        "use_objective_normalization": True,
+        "use_global_progress_weights": True,
+        "progress_beta": 2.0,
+        "progress_min_weight": 0.5,
+        "progress_max_weight": 2.0,
+        "progress_ema_beta": 0.0,
+        "progress_max_change": 0.0,
+        "local_momentum_beta": 0.0,
+        "global_momentum_beta": 0.0,
+        "shared_prox_mu": 0.0,
+        "conflict_aware_momentum": False,
+        "upload_align_scores": False,
+        "public_preprocess_alpha": 0.25,
+        "public_preprocess_mode": "common_safe_ray",
+        "public_preprocess_positive_only": False,
+        "public_preprocess_center_mode": "mean",
+        "public_preprocess_trim_k": 0,
+        "public_preprocess_adaptive_mode": "fixed",
+        "public_preprocess_recompute_interval": 5,
+        "public_preprocess_probe_batch_size": 32,
+        "public_preprocess_steps": 2,
+    },
 }
 
 ALL_FIELDNAMES = [
@@ -228,18 +256,11 @@ ALL_FIELDNAMES = [
     "shared_prox_mu",
     "use_shared_scaffold",
     "model_arch", "total_local_steps",
-    "elapsed_time", "all_decreased", "avg_ri",
+    "elapsed_time",
     "avg_upload_bytes", "avg_round_time", "upload_per_client",
-    "avg_rescale_factor", "avg_cosine_sim", "avg_prox_ratio", "avg_scaffold_ratio", "avg_effective_beta",
-    "avg_task_weight_gap",
-    "avg_accuracy", "avg_f1", "task_jfi", "task_mmag",
-    "avg_mse", "max_mse", "mse_std",
+    "avg_accuracy", "avg_f1", "min_task_acc", "min_task_f1",
+    "avg_mse", "max_mse", "mse_std", "avg_r2",
 ]
-MAX_M = 8
-for _i in range(MAX_M):
-    ALL_FIELDNAMES.extend([f"init_obj_{_i}", f"final_obj_{_i}", f"delta_obj_{_i}"])
-for _i in range(MAX_M):
-    ALL_FIELDNAMES.extend([f"task_{_i}_acc", f"task_{_i}_f1", f"task_{_i}_mse"])
 
 
 def build_trainer(method, model, client_datasets, objective_fn, m, seed,
@@ -279,6 +300,15 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             progress_max_change=cfg["progress_max_change"],
             method_name=method,
             use_shared_scaffold=cfg.get("use_shared_scaffold", False),
+            public_preprocess_alpha=cfg.get("public_preprocess_alpha", 0.0),
+            public_preprocess_mode=cfg.get("public_preprocess_mode", ""),
+            public_preprocess_positive_only=cfg.get("public_preprocess_positive_only", False),
+            public_preprocess_center_mode=cfg.get("public_preprocess_center_mode", "mean"),
+            public_preprocess_trim_k=cfg.get("public_preprocess_trim_k", 0),
+            public_preprocess_adaptive_mode=cfg.get("public_preprocess_adaptive_mode", "fixed"),
+            public_preprocess_recompute_interval=cfg.get("public_preprocess_recompute_interval", 1),
+            public_preprocess_probe_batch_size=cfg.get("public_preprocess_probe_batch_size"),
+            public_preprocess_steps=cfg.get("public_preprocess_steps", 0),
         )
         return NFJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -348,38 +378,13 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
     )
 
     start = time.time()
-    initial_obj = trainer.server.evaluate_global_objectives()
     history = trainer.fit()
     elapsed = time.time() - start
 
-    objective_summary = summarize_objective_history(initial_obj, [s.objective_values for s in history])
-    final_obj = objective_summary["final_obj"]
-    avg_ri = float(objective_summary["avg_ri"])
-    all_decreased = bool(objective_summary["all_decreased"])
     round_summary = summarize_round_history(history)
     avg_upload = round_summary["avg_upload_bytes"]
     avg_round_time = round_summary["avg_round_time"]
     upload_per_client = round_summary["upload_per_client"]
-
-    avg_rescale = 1.0
-    avg_cosine_sim = 0.0
-    avg_prox_ratio = 0.0
-    avg_scaffold_ratio = 0.0
-    avg_effective_beta = 0.9
-    avg_task_weight_gap = 0.0
-    if method in NFJD_VARIANT_CONFIGS:
-        rescale_vals = [s.avg_rescale_factor for s in history]
-        avg_rescale = sum(rescale_vals) / len(rescale_vals) if rescale_vals else 1.0
-        cosine_vals = [getattr(s, "avg_cosine_sim", 0.0) for s in history]
-        avg_cosine_sim = sum(cosine_vals) / len(cosine_vals) if cosine_vals else 0.0
-        prox_vals = [getattr(s, "avg_prox_ratio", 0.0) for s in history]
-        avg_prox_ratio = sum(prox_vals) / len(prox_vals) if prox_vals else 0.0
-        scaffold_vals = [getattr(s, "avg_scaffold_ratio", 0.0) for s in history]
-        avg_scaffold_ratio = sum(scaffold_vals) / len(scaffold_vals) if scaffold_vals else 0.0
-        beta_vals = [getattr(s, "effective_global_beta", 0.9) for s in history]
-        avg_effective_beta = sum(beta_vals) / len(beta_vals) if beta_vals else 0.9
-        weight_gap_vals = [getattr(s, "task_weight_gap", 0.0) for s in history]
-        avg_task_weight_gap = sum(weight_gap_vals) / len(weight_gap_vals) if weight_gap_vals else 0.0
 
     total_local_steps = local_epochs * sum(max(int(getattr(s, "num_sampled_clients", 0)), 0) for s in history)
     spec = get_phase5_method_spec(method)
@@ -410,35 +415,14 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "use_shared_scaffold": nfjd_cfg.get("use_shared_scaffold", False) if nfjd_cfg else False,
         "model_arch": model_arch,
         "total_local_steps": total_local_steps,
-        "elapsed_time": round(elapsed, 2), "all_decreased": all_decreased,
-        "avg_ri": round(avg_ri, 6),
+        "elapsed_time": round(elapsed, 2),
         "avg_upload_bytes": round(avg_upload, 0),
         "avg_round_time": round(avg_round_time, 4),
         "upload_per_client": round(upload_per_client, 0),
-        "avg_rescale_factor": round(avg_rescale, 4),
-        "avg_cosine_sim": round(avg_cosine_sim, 4),
-        "avg_prox_ratio": round(avg_prox_ratio, 6),
-        "avg_scaffold_ratio": round(avg_scaffold_ratio, 6),
-        "avg_effective_beta": round(avg_effective_beta, 4),
-        "avg_task_weight_gap": round(avg_task_weight_gap, 4),
-        "avg_accuracy": "", "avg_f1": "", "task_jfi": "", "task_mmag": "",
-        "avg_mse": "", "max_mse": "", "mse_std": "",
+        "avg_accuracy": "", "avg_f1": "", "min_task_acc": "", "min_task_f1": "",
+        "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
     }
-    for i in range(MAX_M):
-        if i < m:
-            row[f"init_obj_{i}"] = round(initial_obj[i], 6)
-            row[f"final_obj_{i}"] = round(final_obj[i], 6)
-            row[f"delta_obj_{i}"] = round(final_obj[i] - initial_obj[i], 6)
-        else:
-            row[f"init_obj_{i}"] = ""
-            row[f"final_obj_{i}"] = ""
-            row[f"delta_obj_{i}"] = ""
-    for i in range(MAX_M):
-        row[f"task_{i}_acc"] = ""
-        row[f"task_{i}_f1"] = ""
-        row[f"task_{i}_mse"] = ""
-
-    logger.info("[%s] %s (%s): RI=%.4f steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, avg_ri, total_local_steps, elapsed)
+    logger.info("[%s] %s (%s): steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, total_local_steps, elapsed)
     return row
 
 
@@ -461,23 +445,18 @@ def fill_classification_metrics(row, predictions, targets, m):
     f1s = compute_f1_scores(predictions, targets, m)
     row["avg_accuracy"] = round(sum(accs) / m, 4)
     row["avg_f1"] = round(sum(f1s) / m, 4)
-    row["task_jfi"] = round(jain_fairness_index(accs), 4)
-    row["task_mmag"] = round(min_max_gap(accs), 4)
-    for i in range(m):
-        row[f"task_{i}_acc"] = round(accs[i], 4)
-        row[f"task_{i}_f1"] = round(f1s[i], 4)
+    row["min_task_acc"] = round(min(accs), 4)
+    row["min_task_f1"] = round(min(f1s), 4)
     return row
 
 
 def fill_regression_metrics(row, predictions, targets, m):
     mses = compute_mse_per_task(predictions, targets, m)
+    r2s = compute_r2_per_task(predictions, targets, m)
     row["avg_mse"] = round(sum(mses) / m, 6)
     row["max_mse"] = round(max(mses), 6)
     row["mse_std"] = round(float(np.std(mses)), 6)
-    row["task_jfi"] = round(jain_fairness_index([1.0 / (ms + 1e-8) for ms in mses]), 4)
-    row["task_mmag"] = round(min_max_gap(mses), 6)
-    for i in range(m):
-        row[f"task_{i}_mse"] = round(mses[i], 6)
+    row["avg_r2"] = round(sum(r2s) / m, 6)
     return row
 
 
