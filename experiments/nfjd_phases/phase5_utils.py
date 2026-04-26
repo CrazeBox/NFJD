@@ -11,6 +11,7 @@ import torch
 from fedjd.core import (
     FMGDAClient, FMGDAServer, FedAvgUPGradServer,
     FedClientUPGradServer, FedJDClient, FedLocalTrainClient, FedMGDAPlusServer,
+    QFedAvgServer,
     NFJDClient, NFJDServer, NFJDTrainer,
     PHASE5_FORMAL_BASELINES, Phase5OfficialBaselineClient,
     Phase5OfficialBaselineServer, FedJDTrainer, get_phase5_method_spec,
@@ -408,6 +409,29 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             eval_dataset=eval_dataset,
             update_scale=fedclient_update_scale,
             normalize_client_updates=fedclient_normalize_updates,
+        )
+        return FedJDTrainer(server=server, num_rounds=num_rounds)
+
+    if method == "qfedavg":
+        clients = [
+            FedLocalTrainClient(
+                client_id=i,
+                dataset=client_datasets[i],
+                batch_size=256,
+                device=device,
+                learning_rate=learning_rate,
+                local_epochs=local_epochs,
+            )
+            for i in range(num_clients)
+        ]
+        server = QFedAvgServer(
+            model=model,
+            clients=clients,
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 

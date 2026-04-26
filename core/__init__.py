@@ -6,6 +6,7 @@ from .baselines import (
     FedClientUPGradServer,
     FedLocalTrainClient,
     FedMGDAPlusServer,
+    QFedAvgServer,
     WeightedSumServer,
 )
 from .client import ClientResult, FedJDClient, ObjectiveFn
@@ -40,6 +41,7 @@ __all__ = [
     "FedJDTrainer",
     "FedLocalTrainClient",
     "FedMGDAPlusServer",
+    "QFedAvgServer",
     "FMGDAServer",
     "GlobalMomentum",
     "LocalMomentum",

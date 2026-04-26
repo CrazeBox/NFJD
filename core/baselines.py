@@ -406,6 +406,7 @@ class LocalTrainClientResult:
     client_id: int
     delta_theta: torch.Tensor
     num_examples: int
+    initial_loss: float = 0.0
     compute_time: float = 0.0
     upload_bytes: int = 0
     peak_memory_mb: float = 0.0
@@ -427,8 +428,27 @@ class FedLocalTrainClient:
     def num_examples(self) -> int:
         return len(self.dataset)
 
+    def evaluate_weighted_loss(self, model: nn.Module, objective_fn: ObjectiveFn) -> float:
+        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False)
+        total_loss = 0.0
+        total_examples = 0
+        model.eval()
+        with torch.no_grad():
+            for batch_inputs, batch_targets in loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+                predictions = model(batch_inputs)
+                losses = objective_fn(predictions, batch_targets, batch_inputs)
+                loss = sum(losses) / max(len(losses), 1)
+                batch_size = int(batch_inputs.shape[0])
+                total_loss += float(loss.item()) * batch_size
+                total_examples += batch_size
+        model.train()
+        return total_loss / max(total_examples, 1)
+
     def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> LocalTrainClientResult:
         start = time.time()
+        initial_loss = self.evaluate_weighted_loss(model, objective_fn)
         theta_init = flatten_parameters(model.parameters()).clone()
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -451,6 +471,7 @@ class FedLocalTrainClient:
             client_id=self.client_id,
             delta_theta=delta_theta.detach().clone(),
             num_examples=self.num_examples,
+            initial_loss=initial_loss,
             compute_time=time.time() - start,
             upload_bytes=upload_bytes,
             peak_memory_mb=_measure_peak_memory(),
@@ -557,6 +578,104 @@ class FedClientUPGradServer:
             jacobian_vs_gradient_ratio=0.0,
             local_steps=local_steps,
             method_name="fedclient_upgrad",
+        )
+
+
+class QFedAvgServer:
+    """q-FedAvg/q-FFL style loss-aware aggregation with FedAvg uploads."""
+
+    def __init__(self, model, clients, objective_fn, participation_rate,
+                 learning_rate, device, eval_dataset=None, q: float = 0.5,
+                 eps: float = 1e-12):
+        self.model = model.to(device)
+        self.clients = clients
+        self.objective_fn = objective_fn
+        self.participation_rate = participation_rate
+        self.learning_rate = learning_rate
+        self.device = device
+        self.eval_dataset = eval_dataset
+        self.q = float(q)
+        self.eps = eps
+
+    def evaluate_global_objectives(self):
+        if self.eval_dataset is not None:
+            return evaluate_objectives_on_dataset(self.model, self.eval_dataset, self.objective_fn, self.device)
+        return _evaluate_global_objectives(self.model, self.clients, self.objective_fn, self.device)
+
+    def sample_clients(self):
+        sample_size = max(int(len(self.clients) * self.participation_rate), 1)
+        return random.sample(self.clients, sample_size)
+
+    def _clone_model(self):
+        return copy.deepcopy(self.model).to(self.device)
+
+    def run_round(self, round_idx):
+        round_start = time.time()
+        sampled = self.sample_clients()
+        sampled_ids = []
+        total_upload = 0
+        total_nan_inf = 0
+        max_client_mem = 0.0
+        local_steps = 1
+        weighted_deltas = []
+        h_values = []
+
+        client_start = time.time()
+        for client in sampled:
+            result = client.local_update(self._clone_model(), self.objective_fn)
+            delta = result.delta_theta.to(self.device)
+            loss = max(float(result.initial_loss), self.eps)
+            grad_proxy = -delta / max(self.learning_rate, self.eps)
+            grad_norm_sq = float(torch.dot(grad_proxy, grad_proxy).item())
+            loss_q = loss ** self.q
+            h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + (1.0 / max(self.learning_rate, self.eps)) * loss_q
+            weighted_deltas.append(loss_q * delta)
+            h_values.append(max(h_i, self.eps))
+            sampled_ids.append(result.client_id)
+            total_upload += result.upload_bytes
+            total_nan_inf += _count_nan_inf(delta)
+            if result.peak_memory_mb > max_client_mem:
+                max_client_mem = result.peak_memory_mb
+            local_steps = getattr(client, "local_epochs", 1)
+        client_compute_time = time.time() - client_start
+
+        if not weighted_deltas:
+            raise RuntimeError("No client contributed q-FedAvg updates.")
+
+        dir_start = time.time()
+        aggregate_delta = sum(weighted_deltas) / max(sum(h_values), self.eps)
+        direction = -aggregate_delta
+        direction_time = time.time() - dir_start
+        total_nan_inf += _count_nan_inf(direction)
+
+        update_start = time.time()
+        current_flat = flatten_parameters(self.model.parameters())
+        next_flat = current_flat + aggregate_delta
+        assign_flat_parameters(self.model.parameters(), next_flat)
+        update_time = time.time() - update_start
+
+        model_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled)
+        per_client_upload = total_upload // max(len(sampled), 1)
+        round_time = time.time() - round_start
+
+        return RoundStats(
+            round_idx=round_idx, sampled_client_ids=sampled_ids,
+            num_sampled_clients=len(sampled),
+            objective_values=self.evaluate_global_objectives(),
+            direction_norm=float(torch.norm(direction, p=2).item()),
+            jacobian_norm=0.0,
+            round_time=round_time, upload_bytes=total_upload,
+            download_bytes=download_bytes, nan_inf_count=total_nan_inf,
+            client_compute_time=client_compute_time,
+            direction_time=direction_time, update_time=update_time,
+            client_peak_memory_mb=max_client_mem,
+            server_peak_memory_mb=_measure_peak_memory(),
+            jacobian_upload_per_client=0,
+            gradient_upload_per_client=per_client_upload,
+            jacobian_vs_gradient_ratio=0.0,
+            local_steps=local_steps,
+            method_name="qfedavg",
         )
 
 

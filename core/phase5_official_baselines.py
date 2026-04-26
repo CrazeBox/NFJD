@@ -173,6 +173,15 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         official_repo="",
         implementation_note="Clients perform ordinary local weighted-sum training and upload model deltas; the server treats sampled clients as descent objectives and uses UPGrad to choose a common update that mitigates client-level conflicts.",
     ),
+    "qfedavg": Phase5MethodSpec(
+        method="qfedavg",
+        display_name="q-FedAvg",
+        family="federated_fairness_baseline",
+        paper_title="Fair Resource Allocation in Federated Learning (q-FFL / q-FedAvg)",
+        paper_url="https://arxiv.org/abs/1905.10497",
+        official_repo="",
+        implementation_note="FedAvg-style local training with loss-aware q-FFL aggregation. Clients upload one model delta; the server weights updates by the current local objective value to emphasize high-loss clients.",
+    ),
     "fedavg_pcgrad": Phase5MethodSpec(
         method="fedavg_pcgrad",
         display_name="FedAvg+PCGrad",
