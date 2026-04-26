@@ -19,7 +19,7 @@ def make_multimnist(
     noniid_classes_per_client: int = 2,
     seed: int = 7,
     image_size: int = 36,
-    max_overlap: int = 6,
+    max_shift: int = 4,
 ) -> dict:
     torch.manual_seed(seed)
 
@@ -33,9 +33,19 @@ def make_multimnist(
     test_images = test_dataset.data.float() / 255.0
     test_labels = test_dataset.targets
 
+    def _sample_indices(num_source, n_samples, rng):
+        chunks = []
+        remaining = n_samples
+        while remaining > 0:
+            perm = rng.permutation(num_source)
+            take = min(remaining, num_source)
+            chunks.append(perm[:take])
+            remaining -= take
+        return np.concatenate(chunks)
+
     def _generate_pairs(images, labels, n_samples, rng):
-        idx_L = rng.randint(0, len(images), size=n_samples)
-        idx_R = rng.randint(0, len(images), size=n_samples)
+        idx_L = _sample_indices(len(images), n_samples, rng)
+        idx_R = _sample_indices(len(images), n_samples, rng)
 
         canvas = torch.zeros(n_samples, 1, image_size, image_size)
         labels_L = labels[idx_L]
@@ -45,15 +55,18 @@ def make_multimnist(
             img_L = images[idx_L[i]].unsqueeze(0).unsqueeze(0)
             img_R = images[idx_R[i]].unsqueeze(0).unsqueeze(0)
 
-            off_L_r = rng.randint(0, max_overlap + 1)
-            off_L_c = rng.randint(0, max_overlap + 1)
-            off_R_r = rng.randint(image_size - 28 - max_overlap, image_size - 28 + 1)
-            off_R_c = rng.randint(image_size - 28 - max_overlap, image_size - 28 + 1)
+            max_offset = image_size - 28
+            if max_shift < 0 or max_shift > max_offset:
+                raise ValueError(f"max_shift must be in [0, {max_offset}] for image_size={image_size}.")
+            off_L_r = rng.randint(0, max_shift + 1)
+            off_L_c = rng.randint(0, max_shift + 1)
+            off_R_r = rng.randint(max_offset - max_shift, max_offset + 1)
+            off_R_c = rng.randint(max_offset - max_shift, max_offset + 1)
 
-            canvas[i, 0, off_L_r:off_L_r+28, off_L_c:off_L_c+28] = torch.max(
-                canvas[i, 0, off_L_r:off_L_r+28, off_L_c:off_L_c+28], img_L[0, 0])
-            canvas[i, 0, off_R_r:off_R_r+28, off_R_c:off_R_c+28] = torch.max(
-                canvas[i, 0, off_R_r:off_R_r+28, off_R_c:off_R_c+28], img_R[0, 0])
+            canvas[i, 0, off_L_r:off_L_r+28, off_L_c:off_L_c+28] += img_L[0, 0]
+            canvas[i, 0, off_R_r:off_R_r+28, off_R_c:off_R_c+28] += img_R[0, 0]
+
+        canvas.clamp_(0.0, 1.0)
 
         targets = torch.stack([labels_L, labels_R], dim=1)
         return canvas, targets

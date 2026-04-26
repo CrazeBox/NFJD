@@ -22,7 +22,7 @@ from fedjd.experiments.nfjd_phases.phase5_utils import (
     fill_classification_metrics,
     fill_regression_metrics,
 )
-from fedjd.models.lenet_mtl import LeNetMTL
+from fedjd.models.basic_cnn_mtl import BasicCNNMTL
 from fedjd.models.river_flow_mlp import RiverFlowMLP
 from fedjd.problems import multi_objective_regression, multi_task_classification
 
@@ -44,12 +44,24 @@ DEFAULT_METHODS = ["fmgda", "fedmgda_plus", "qfedavg", "fedclient_upgrad"]
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
-    fieldnames = [
+    base_fields = [
         "exp_id", "method", "dataset", "data_split", "m", "seed", "num_rounds",
         "num_clients", "participation_rate", "learning_rate", "local_epochs",
         "fedclient_update_scale", "fedclient_normalize_updates",
-        "avg_mse", "max_mse", "mse_std", "avg_r2",
-        "avg_accuracy", "avg_f1", "min_task_acc", "min_task_f1",
+    ]
+
+    datasets = {row.get("dataset") for row in rows}
+    if datasets == {"riverflow"}:
+        metric_fields = ["avg_mse", "max_mse", "mse_std", "avg_r2"]
+    elif datasets == {"multimnist"}:
+        metric_fields = ["avg_accuracy", "avg_f1", "min_task_acc", "min_task_f1"]
+    else:
+        metric_fields = [
+            "avg_mse", "max_mse", "mse_std", "avg_r2",
+            "avg_accuracy", "avg_f1", "min_task_acc", "min_task_f1",
+        ]
+
+    fieldnames = base_fields + metric_fields + [
         "elapsed_time", "avg_upload_bytes", "avg_round_time", "upload_per_client",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,11 +99,11 @@ def run_one(
         model_arch = "river_flow_mlp"
     elif dataset == "multimnist":
         data = make_multimnist(num_clients=num_clients, iid=iid, seed=seed)
-        model = LeNetMTL(input_channels=1, num_tasks=2, num_classes=10)
+        model = BasicCNNMTL(input_channels=1, num_tasks=2, num_classes=10)
         objective_fn = multi_task_classification
         metric_kind = "classification"
         m = 2
-        model_arch = "lenet_mtl"
+        model_arch = "basic_cnn_mtl"
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
