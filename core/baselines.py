@@ -102,6 +102,7 @@ class FMGDAClient:
             objective_idx: copy.deepcopy(model).to(self.device)
             for objective_idx in active_objectives
         }
+        theta_init = flatten_parameters(model.parameters()).detach().clone()
         objective_updates = None
         weights = torch.zeros(num_objectives, dtype=torch.float32, device=self.device)
 
@@ -128,7 +129,6 @@ class FMGDAClient:
                             device=self.device,
                         )
 
-                    objective_updates[objective_idx].add_(gradient, alpha=batch_weight)
                     weights[objective_idx] += batch_weight
 
                     next_flat = flatten_parameters(local_model.parameters()) - self.learning_rate * gradient
@@ -140,7 +140,11 @@ class FMGDAClient:
         objective_mask = weights > 0
         for objective_idx in active_objectives:
             if weights[objective_idx] > 0:
-                objective_updates[objective_idx] /= weights[objective_idx]
+                # Use the local objective trajectory as a FedAvg-budget gradient proxy.
+                # theta_init - theta_local points in the descent-gradient direction and
+                # has the same communication-round scale as ordinary FedAvg deltas.
+                theta_local = flatten_parameters(local_models[objective_idx].parameters()).detach()
+                objective_updates[objective_idx] = theta_init - theta_local
 
         uploaded = objective_updates[objective_mask]
         upload_bytes = uploaded.numel() * uploaded.element_size()
@@ -161,7 +165,7 @@ class FMGDAServer:
 
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, weights=None, aggregator=None,
-                 eval_dataset=None, num_objectives=None):
+                 eval_dataset=None, num_objectives=None, update_scale: float = 1.0):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -172,6 +176,7 @@ class FMGDAServer:
         self.aggregator = aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         self.eval_dataset = eval_dataset
         self.num_objectives = num_objectives
+        self.update_scale = float(update_scale)
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -258,7 +263,7 @@ class FMGDAServer:
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat - self.learning_rate * direction
+        next_flat = current_flat - self.update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 
@@ -289,25 +294,29 @@ class FMGDAServer:
 
 
 class FedMGDAPlusServer(FMGDAServer):
-    """FedMGDA+ style local MGDA directions followed by server averaging.
+    """FedMGDA+ style client-objective MGDA over FedAvg local deltas.
 
-    This matches the practical communication-saving variant: each sampled client
-    computes its local per-objective gradient matrix, solves a local MGDA
-    problem, uploads one d-dimensional common direction, and the server averages
-    these local common directions before updating the global model.
+    Following the FedMGDA+ formulation, each sampled client's local empirical
+    loss is treated as an objective. Clients upload one FedAvg-style model delta;
+    the server solves an MGDA/min-norm problem over client gradient proxies.
     """
 
-    def __init__(self, *args, aggregator=None, **kwargs):
-        super().__init__(*args, aggregator=aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0), **kwargs)
+    def __init__(self, model, clients, objective_fn, participation_rate,
+                 learning_rate, device, eval_dataset=None, aggregator=None,
+                 update_scale: float = 1.0, **kwargs):
+        self.model = model.to(device)
+        self.clients = clients
+        self.objective_fn = objective_fn
+        self.participation_rate = participation_rate
+        self.learning_rate = learning_rate
+        self.device = device
+        self.eval_dataset = eval_dataset
+        self.aggregator = aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
+        self.update_scale = float(update_scale)
 
     def run_round(self, round_idx):
         round_start = time.time()
         sampled = self.sample_clients()
-        num_objectives = self.num_objectives
-        if num_objectives is None:
-            num_objectives = len(self.evaluate_global_objectives())
-            self.num_objectives = num_objectives
-
         client_start = time.time()
         sampled_ids = []
         total_upload = 0
@@ -315,24 +324,14 @@ class FedMGDAPlusServer(FMGDAServer):
         max_client_mem = 0.0
         per_client_upload = 0
         local_steps = 1
-        total_examples = sum(client.num_examples for client in sampled)
-        local_directions = []
+        client_rows = []
 
         for client in sampled:
-            result = client.compute_objective_updates(
-                self._clone_model(),
-                self.objective_fn,
-                num_objectives=num_objectives,
-            )
-            active = result.objective_mask.to(self.device)
-            if active.any():
-                local_jacobian = result.objective_updates.to(self.device)[active]
-                local_direction = self.aggregator(local_jacobian)
-                local_directions.append((local_direction, result.num_examples / max(total_examples, 1)))
-                total_nan_inf += _count_nan_inf(local_direction)
+            result = client.local_update(self._clone_model(), self.objective_fn)
+            client_rows.append((-result.delta_theta).to(self.device))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
-            total_nan_inf += _count_nan_inf(result.objective_updates)
+            total_nan_inf += _count_nan_inf(result.delta_theta)
             if result.peak_memory_mb > max_client_mem:
                 max_client_mem = result.peak_memory_mb
             if per_client_upload == 0:
@@ -340,17 +339,18 @@ class FedMGDAPlusServer(FMGDAServer):
             local_steps = getattr(client, "local_epochs", 1)
         client_compute_time = time.time() - client_start
 
-        if not local_directions:
+        if not client_rows:
             raise RuntimeError("No client contributed FedMGDA+ local directions.")
 
         dir_start = time.time()
-        direction = sum(local_dir * weight for local_dir, weight in local_directions)
+        client_jacobian = torch.stack(client_rows, dim=0)
+        direction = self.aggregator(client_jacobian)
         direction_time = time.time() - dir_start
         total_nan_inf += _count_nan_inf(direction)
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat - self.learning_rate * direction
+        next_flat = current_flat - self.update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 
@@ -364,7 +364,7 @@ class FedMGDAPlusServer(FMGDAServer):
             num_sampled_clients=len(sampled),
             objective_values=self.evaluate_global_objectives(),
             direction_norm=float(torch.norm(direction, p=2).item()),
-            jacobian_norm=0.0,
+            jacobian_norm=float(torch.norm(client_jacobian, p="fro").item()),
             round_time=round_time, upload_bytes=total_upload,
             download_bytes=download_bytes, nan_inf_count=total_nan_inf,
             client_compute_time=client_compute_time,
@@ -586,7 +586,7 @@ class QFedAvgServer:
 
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, eval_dataset=None, q: float = 0.5,
-                 eps: float = 1e-12):
+                 eps: float = 1e-12, update_scale: float = 1.0):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -596,6 +596,7 @@ class QFedAvgServer:
         self.eval_dataset = eval_dataset
         self.q = float(q)
         self.eps = eps
+        self.update_scale = float(update_scale)
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -625,11 +626,11 @@ class QFedAvgServer:
             result = client.local_update(self._clone_model(), self.objective_fn)
             delta = result.delta_theta.to(self.device)
             loss = max(float(result.initial_loss), self.eps)
-            grad_proxy = -delta / max(self.learning_rate, self.eps)
+            grad_proxy = -delta / max(self.learning_rate * max(getattr(client, "local_epochs", 1), 1), self.eps)
             grad_norm_sq = float(torch.dot(grad_proxy, grad_proxy).item())
             loss_q = loss ** self.q
             h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + (1.0 / max(self.learning_rate, self.eps)) * loss_q
-            weighted_deltas.append(loss_q * delta)
+            weighted_deltas.append(loss_q * grad_proxy)
             h_values.append(max(h_i, self.eps))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
@@ -643,14 +644,13 @@ class QFedAvgServer:
             raise RuntimeError("No client contributed q-FedAvg updates.")
 
         dir_start = time.time()
-        aggregate_delta = sum(weighted_deltas) / max(sum(h_values), self.eps)
-        direction = -aggregate_delta
+        direction = sum(weighted_deltas) / max(sum(h_values), self.eps)
         direction_time = time.time() - dir_start
         total_nan_inf += _count_nan_inf(direction)
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat + aggregate_delta
+        next_flat = current_flat - self.update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 

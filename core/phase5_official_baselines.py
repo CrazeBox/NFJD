@@ -8,7 +8,11 @@ from itertools import chain
 
 import numpy as np
 import torch
-from scipy.optimize import minimize, minimize_scalar
+try:
+    from scipy.optimize import minimize, minimize_scalar
+except ModuleNotFoundError:  # Optional: only FedAvg+CAGrad needs SciPy.
+    minimize = None
+    minimize_scalar = None
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -308,6 +312,8 @@ def _pcgrad_direction(jacobian: torch.Tensor, generator: torch.Generator) -> tor
 
 
 def _cagrad_direction(jacobian: torch.Tensor, c: float = 0.4) -> torch.Tensor:
+    if minimize is None or minimize_scalar is None:
+        raise ImportError("FedAvg+CAGrad requires scipy. Install scipy or omit fedavg_cagrad.")
     if jacobian.shape[0] == 1:
         return jacobian[0]
 

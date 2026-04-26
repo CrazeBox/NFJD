@@ -48,6 +48,8 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "exp_id", "method", "dataset", "data_split", "m", "seed", "num_rounds",
         "num_clients", "participation_rate", "learning_rate", "local_epochs",
         "fedclient_update_scale", "fedclient_normalize_updates",
+        "fmgda_update_scale", "fedmgda_plus_update_scale",
+        "qfedavg_q", "qfedavg_update_scale",
     ]
 
     datasets = {row.get("dataset") for row in rows}
@@ -84,6 +86,10 @@ def run_one(
     riverflow_tasks: int,
     fedclient_update_scale: float,
     fedclient_normalize_updates: bool,
+    fmgda_update_scale: float,
+    fedmgda_plus_update_scale: float,
+    qfedavg_q: float,
+    qfedavg_update_scale: float,
 ) -> dict:
     split_name = "iid" if iid else "noniid"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,6 +134,10 @@ def run_one(
         eval_dataset=data["val_dataset"],
         fedclient_update_scale=fedclient_update_scale,
         fedclient_normalize_updates=fedclient_normalize_updates,
+        fmgda_update_scale=fmgda_update_scale,
+        fedmgda_plus_update_scale=fedmgda_plus_update_scale,
+        qfedavg_q=qfedavg_q,
+        qfedavg_update_scale=qfedavg_update_scale,
     )
 
     start = time.time()
@@ -150,6 +160,10 @@ def run_one(
         "local_epochs": local_epochs,
         "fedclient_update_scale": fedclient_update_scale if method == "fedclient_upgrad" else "",
         "fedclient_normalize_updates": fedclient_normalize_updates if method == "fedclient_upgrad" else "",
+        "fmgda_update_scale": fmgda_update_scale if method == "fmgda" else "",
+        "fedmgda_plus_update_scale": fedmgda_plus_update_scale if method == "fedmgda_plus" else "",
+        "qfedavg_q": qfedavg_q if method == "qfedavg" else "",
+        "qfedavg_update_scale": qfedavg_update_scale if method == "qfedavg" else "",
         "avg_mse": "",
         "max_mse": "",
         "mse_std": "",
@@ -185,6 +199,10 @@ def parse_args():
     parser.add_argument("--riverflow-tasks", type=int, default=4)
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
     parser.add_argument("--fedclient-normalize-updates", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--fmgda-update-scale", type=float, default=1.0)
+    parser.add_argument("--fedmgda-plus-update-scale", type=float, default=1.0)
+    parser.add_argument("--qfedavg-q", type=float, default=0.5)
+    parser.add_argument("--qfedavg-update-scale", type=float, default=1.0)
     parser.add_argument("--output", type=str, default="phase5_fmoo_compare.csv")
     return parser.parse_args()
 
@@ -216,6 +234,10 @@ def main():
                 riverflow_tasks=args.riverflow_tasks,
                 fedclient_update_scale=args.fedclient_update_scale,
                 fedclient_normalize_updates=bool(args.fedclient_normalize_updates),
+                fmgda_update_scale=args.fmgda_update_scale,
+                fedmgda_plus_update_scale=args.fedmgda_plus_update_scale,
+                qfedavg_q=args.qfedavg_q,
+                qfedavg_update_scale=args.qfedavg_update_scale,
             ))
         except Exception as exc:
             logger.exception("Experiment failed: %s", exc)

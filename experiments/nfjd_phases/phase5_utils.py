@@ -269,7 +269,11 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                   device, num_rounds, num_clients, participation_rate,
                   learning_rate, local_epochs=1, eval_dataset=None,
                   fedclient_update_scale: float = 1.0,
-                  fedclient_normalize_updates: bool = False):
+                  fedclient_normalize_updates: bool = False,
+                  fmgda_update_scale: float = 1.0,
+                  fedmgda_plus_update_scale: float = 1.0,
+                  qfedavg_q: float = 0.5,
+                  qfedavg_update_scale: float = 1.0):
     if method in NFJD_VARIANT_CONFIGS:
         cfg = NFJD_VARIANT_CONFIGS[method]
         subset_size = cfg["stochastic_subset_size"] or min(4, m)
@@ -337,12 +341,13 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             device=device,
             eval_dataset=eval_dataset,
             num_objectives=m,
+            update_scale=fmgda_update_scale,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
     if method == "fedmgda_plus":
         clients = [
-            FMGDAClient(
+            FedLocalTrainClient(
                 client_id=i,
                 dataset=client_datasets[i],
                 batch_size=256,
@@ -360,7 +365,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             learning_rate=learning_rate,
             device=device,
             eval_dataset=eval_dataset,
-            num_objectives=m,
+            update_scale=fedmgda_plus_update_scale,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -384,6 +389,8 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             learning_rate=learning_rate,
             device=device,
             eval_dataset=eval_dataset,
+            q=qfedavg_q,
+            update_scale=qfedavg_update_scale,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -467,7 +474,11 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
                    device, num_rounds, num_clients, participation_rate, learning_rate,
                    model_arch, dataset, data_split, local_epochs=1,
                    eval_dataset=None, fedclient_update_scale: float = 1.0,
-                   fedclient_normalize_updates: bool = False):
+                   fedclient_normalize_updates: bool = False,
+                   fmgda_update_scale: float = 1.0,
+                   fedmgda_plus_update_scale: float = 1.0,
+                   qfedavg_q: float = 0.5,
+                   qfedavg_update_scale: float = 1.0):
 
     trainer = build_trainer(
         method=method, model=model, client_datasets=client_datasets,
@@ -477,6 +488,10 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         local_epochs=local_epochs, eval_dataset=eval_dataset,
         fedclient_update_scale=fedclient_update_scale,
         fedclient_normalize_updates=fedclient_normalize_updates,
+        fmgda_update_scale=fmgda_update_scale,
+        fedmgda_plus_update_scale=fedmgda_plus_update_scale,
+        qfedavg_q=qfedavg_q,
+        qfedavg_update_scale=qfedavg_update_scale,
     )
 
     start = time.time()
@@ -525,6 +540,10 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
         "fedclient_update_scale": fedclient_update_scale if method == "fedclient_upgrad" else "",
         "fedclient_normalize_updates": fedclient_normalize_updates if method == "fedclient_upgrad" else "",
+        "fmgda_update_scale": fmgda_update_scale if method == "fmgda" else "",
+        "fedmgda_plus_update_scale": fedmgda_plus_update_scale if method == "fedmgda_plus" else "",
+        "qfedavg_q": qfedavg_q if method == "qfedavg" else "",
+        "qfedavg_update_scale": qfedavg_update_scale if method == "qfedavg" else "",
     }
     logger.info("[%s] %s (%s): steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, total_local_steps, elapsed)
     return row
