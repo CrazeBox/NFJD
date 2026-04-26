@@ -1,4 +1,13 @@
-from .baselines import DirectionAvgServer, FMGDAClient, FMGDAServer, WeightedSumServer
+from .baselines import (
+    DirectionAvgServer,
+    FMGDAClient,
+    FMGDAServer,
+    FedAvgUPGradServer,
+    FedClientUPGradServer,
+    FedLocalTrainClient,
+    FedMGDAPlusServer,
+    WeightedSumServer,
+)
 from .client import ClientResult, FedJDClient, ObjectiveFn
 from .nfjd_client import NFJDClient, ClientResult as NFJDClientResult
 from .nfjd_server import NFJDServer, RoundStats as NFJDRoundStats
@@ -24,9 +33,13 @@ __all__ = [
     "ConflictAwareMomentum",
     "DirectionAvgServer",
     "FMGDAClient",
+    "FedAvgUPGradServer",
+    "FedClientUPGradServer",
     "FedJDClient",
     "FedJDServer",
     "FedJDTrainer",
+    "FedLocalTrainClient",
+    "FedMGDAPlusServer",
     "FMGDAServer",
     "GlobalMomentum",
     "LocalMomentum",

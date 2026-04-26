@@ -9,11 +9,11 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from fedjd.aggregators import MinNormAggregator
+from fedjd.aggregators import MinNormAggregator, UPGradAggregator
 
 from .client import FedJDClient, ObjectiveFn, _measure_peak_memory, flatten_gradients
 from .evaluation import evaluate_objectives_on_dataset
-from .server import RoundStats, _count_nan_inf, assign_flat_parameters, flatten_parameters
+from .server import FedJDServer, RoundStats, _count_nan_inf, assign_flat_parameters, flatten_parameters
 
 
 def _evaluate_global_objectives(model, clients, objective_fn, device):
@@ -285,6 +285,278 @@ class FMGDAServer:
             jacobian_vs_gradient_ratio=per_client_upload / max(grad_upload, 1),
             local_steps=local_steps,
             method_name="fmgda",
+        )
+
+
+class FedMGDAPlusServer(FMGDAServer):
+    """FedMGDA+ style local MGDA directions followed by server averaging.
+
+    This matches the practical communication-saving variant: each sampled client
+    computes its local per-objective gradient matrix, solves a local MGDA
+    problem, uploads one d-dimensional common direction, and the server averages
+    these local common directions before updating the global model.
+    """
+
+    def __init__(self, *args, aggregator=None, **kwargs):
+        super().__init__(*args, aggregator=aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0), **kwargs)
+
+    def run_round(self, round_idx):
+        round_start = time.time()
+        sampled = self.sample_clients()
+        num_objectives = self.num_objectives
+        if num_objectives is None:
+            num_objectives = len(self.evaluate_global_objectives())
+            self.num_objectives = num_objectives
+
+        client_start = time.time()
+        sampled_ids = []
+        total_upload = 0
+        total_nan_inf = 0
+        max_client_mem = 0.0
+        per_client_upload = 0
+        local_steps = 1
+        total_examples = sum(client.num_examples for client in sampled)
+        local_directions = []
+
+        for client in sampled:
+            result = client.compute_objective_updates(
+                self._clone_model(),
+                self.objective_fn,
+                num_objectives=num_objectives,
+            )
+            active = result.objective_mask.to(self.device)
+            if active.any():
+                local_jacobian = result.objective_updates.to(self.device)[active]
+                local_direction = self.aggregator(local_jacobian)
+                local_directions.append((local_direction, result.num_examples / max(total_examples, 1)))
+                total_nan_inf += _count_nan_inf(local_direction)
+            sampled_ids.append(result.client_id)
+            total_upload += result.upload_bytes
+            total_nan_inf += _count_nan_inf(result.objective_updates)
+            if result.peak_memory_mb > max_client_mem:
+                max_client_mem = result.peak_memory_mb
+            if per_client_upload == 0:
+                per_client_upload = result.upload_bytes
+            local_steps = getattr(client, "local_epochs", 1)
+        client_compute_time = time.time() - client_start
+
+        if not local_directions:
+            raise RuntimeError("No client contributed FedMGDA+ local directions.")
+
+        dir_start = time.time()
+        direction = sum(local_dir * weight for local_dir, weight in local_directions)
+        direction_time = time.time() - dir_start
+        total_nan_inf += _count_nan_inf(direction)
+
+        update_start = time.time()
+        current_flat = flatten_parameters(self.model.parameters())
+        next_flat = current_flat - self.learning_rate * direction
+        assign_flat_parameters(self.model.parameters(), next_flat)
+        update_time = time.time() - update_start
+
+        model_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled)
+        grad_upload = model_bytes
+        round_time = time.time() - round_start
+
+        return RoundStats(
+            round_idx=round_idx, sampled_client_ids=sampled_ids,
+            num_sampled_clients=len(sampled),
+            objective_values=self.evaluate_global_objectives(),
+            direction_norm=float(torch.norm(direction, p=2).item()),
+            jacobian_norm=0.0,
+            round_time=round_time, upload_bytes=total_upload,
+            download_bytes=download_bytes, nan_inf_count=total_nan_inf,
+            client_compute_time=client_compute_time,
+            direction_time=direction_time, update_time=update_time,
+            client_peak_memory_mb=max_client_mem,
+            server_peak_memory_mb=_measure_peak_memory(),
+            jacobian_upload_per_client=per_client_upload,
+            gradient_upload_per_client=grad_upload,
+            jacobian_vs_gradient_ratio=per_client_upload / max(grad_upload, 1),
+            local_steps=local_steps,
+            method_name="fedmgda_plus",
+        )
+
+
+class FedAvgUPGradServer(FedJDServer):
+    """FedAvg-style client Jacobian upload with server-side UPGrad."""
+
+    def __init__(self, model, clients, objective_fn, participation_rate,
+                 learning_rate, device, eval_dataset=None):
+        super().__init__(
+            model=model,
+            clients=clients,
+            aggregator=UPGradAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0, solver="auto"),
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
+        )
+
+    def run_round(self, round_idx):
+        stats = super().run_round(round_idx)
+        stats.method_name = "fedavg_upgrad"
+        return stats
+
+
+@dataclass
+class LocalTrainClientResult:
+    client_id: int
+    delta_theta: torch.Tensor
+    num_examples: int
+    compute_time: float = 0.0
+    upload_bytes: int = 0
+    peak_memory_mb: float = 0.0
+
+
+class FedLocalTrainClient:
+    """Client that performs ordinary local weighted-sum training and uploads delta theta."""
+
+    def __init__(self, client_id: int, dataset: Dataset, batch_size: int, device: torch.device,
+                 learning_rate: float, local_epochs: int = 1) -> None:
+        self.client_id = client_id
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.device = device
+        self.learning_rate = learning_rate
+        self.local_epochs = local_epochs
+
+    @property
+    def num_examples(self) -> int:
+        return len(self.dataset)
+
+    def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> LocalTrainClientResult:
+        start = time.time()
+        theta_init = flatten_parameters(model.parameters()).clone()
+        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+
+        for _ in range(self.local_epochs):
+            for batch_inputs, batch_targets in loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+                model.zero_grad(set_to_none=True)
+                predictions = model(batch_inputs)
+                losses = objective_fn(predictions, batch_targets, batch_inputs)
+                total_loss = sum(losses) / max(len(losses), 1)
+                total_loss.backward()
+                grads = flatten_gradients(model.parameters())
+                next_flat = flatten_parameters(model.parameters()) - self.learning_rate * grads
+                assign_flat_parameters(model.parameters(), next_flat)
+
+        delta_theta = flatten_parameters(model.parameters()) - theta_init
+        upload_bytes = delta_theta.numel() * delta_theta.element_size()
+        return LocalTrainClientResult(
+            client_id=self.client_id,
+            delta_theta=delta_theta.detach().clone(),
+            num_examples=self.num_examples,
+            compute_time=time.time() - start,
+            upload_bytes=upload_bytes,
+            peak_memory_mb=_measure_peak_memory(),
+        )
+
+
+class FedClientUPGradServer:
+    """Server-side UPGrad over client local updates.
+
+    Each sampled client performs ordinary local training and uploads a model
+    delta. The server treats the negative client deltas as client-loss descent
+    gradients, uses UPGrad to find a common direction across sampled clients,
+    and applies that direction to the global model.
+    """
+
+    def __init__(self, model, clients, objective_fn, participation_rate,
+                 learning_rate, device, eval_dataset=None, aggregator=None,
+                 update_scale: float = 1.0, normalize_client_updates: bool = False):
+        self.model = model.to(device)
+        self.clients = clients
+        self.objective_fn = objective_fn
+        self.participation_rate = participation_rate
+        self.learning_rate = learning_rate
+        self.device = device
+        self.eval_dataset = eval_dataset
+        self.aggregator = aggregator or UPGradAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0, solver="auto")
+        self.update_scale = float(update_scale)
+        self.normalize_client_updates = normalize_client_updates
+
+    def evaluate_global_objectives(self):
+        if self.eval_dataset is not None:
+            return evaluate_objectives_on_dataset(self.model, self.eval_dataset, self.objective_fn, self.device)
+        return _evaluate_global_objectives(self.model, self.clients, self.objective_fn, self.device)
+
+    def sample_clients(self):
+        sample_size = max(int(len(self.clients) * self.participation_rate), 1)
+        return random.sample(self.clients, sample_size)
+
+    def _clone_model(self):
+        return copy.deepcopy(self.model).to(self.device)
+
+    def run_round(self, round_idx):
+        round_start = time.time()
+        sampled = self.sample_clients()
+        sampled_ids = []
+        total_upload = 0
+        total_nan_inf = 0
+        max_client_mem = 0.0
+        local_steps = 1
+        client_rows = []
+
+        client_start = time.time()
+        for client in sampled:
+            result = client.local_update(self._clone_model(), self.objective_fn)
+            # A local delta approximates -eta * grad(client_loss); use -delta as the gradient row.
+            row = (-result.delta_theta).to(self.device)
+            if self.normalize_client_updates:
+                row_norm = torch.norm(row, p=2)
+                if row_norm.item() > 1e-12:
+                    row = row / row_norm
+            client_rows.append(row)
+            sampled_ids.append(result.client_id)
+            total_upload += result.upload_bytes
+            total_nan_inf += _count_nan_inf(result.delta_theta)
+            if result.peak_memory_mb > max_client_mem:
+                max_client_mem = result.peak_memory_mb
+            local_steps = getattr(client, "local_epochs", 1)
+        client_compute_time = time.time() - client_start
+
+        if not client_rows:
+            raise RuntimeError("No client contributed local updates.")
+
+        dir_start = time.time()
+        client_jacobian = torch.stack(client_rows, dim=0)
+        direction = self.aggregator(client_jacobian)
+        direction_time = time.time() - dir_start
+        total_nan_inf += _count_nan_inf(direction)
+
+        update_start = time.time()
+        current_flat = flatten_parameters(self.model.parameters())
+        next_flat = current_flat - self.update_scale * direction
+        assign_flat_parameters(self.model.parameters(), next_flat)
+        update_time = time.time() - update_start
+
+        model_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled)
+        per_client_upload = total_upload // max(len(sampled), 1)
+        round_time = time.time() - round_start
+
+        return RoundStats(
+            round_idx=round_idx, sampled_client_ids=sampled_ids,
+            num_sampled_clients=len(sampled),
+            objective_values=self.evaluate_global_objectives(),
+            direction_norm=float(torch.norm(direction, p=2).item()),
+            jacobian_norm=float(torch.norm(client_jacobian, p="fro").item()),
+            round_time=round_time, upload_bytes=total_upload,
+            download_bytes=download_bytes, nan_inf_count=total_nan_inf,
+            client_compute_time=client_compute_time,
+            direction_time=direction_time, update_time=update_time,
+            client_peak_memory_mb=max_client_mem,
+            server_peak_memory_mb=_measure_peak_memory(),
+            jacobian_upload_per_client=0,
+            gradient_upload_per_client=per_client_upload,
+            jacobian_vs_gradient_ratio=0.0,
+            local_steps=local_steps,
+            method_name="fedclient_upgrad",
         )
 
 

@@ -9,7 +9,8 @@ import numpy as np
 import torch
 
 from fedjd.core import (
-    FMGDAClient, FMGDAServer,
+    FMGDAClient, FMGDAServer, FedAvgUPGradServer,
+    FedClientUPGradServer, FedJDClient, FedLocalTrainClient, FedMGDAPlusServer,
     NFJDClient, NFJDServer, NFJDTrainer,
     PHASE5_FORMAL_BASELINES, Phase5OfficialBaselineClient,
     Phase5OfficialBaselineServer, FedJDTrainer, get_phase5_method_spec,
@@ -265,7 +266,9 @@ ALL_FIELDNAMES = [
 
 def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                   device, num_rounds, num_clients, participation_rate,
-                  learning_rate, local_epochs=1, eval_dataset=None):
+                  learning_rate, local_epochs=1, eval_dataset=None,
+                  fedclient_update_scale: float = 1.0,
+                  fedclient_normalize_updates: bool = False):
     if method in NFJD_VARIANT_CONFIGS:
         cfg = NFJD_VARIANT_CONFIGS[method]
         subset_size = cfg["stochastic_subset_size"] or min(4, m)
@@ -336,6 +339,78 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
+    if method == "fedmgda_plus":
+        clients = [
+            FMGDAClient(
+                client_id=i,
+                dataset=client_datasets[i],
+                batch_size=256,
+                device=device,
+                learning_rate=learning_rate,
+                local_epochs=local_epochs,
+            )
+            for i in range(num_clients)
+        ]
+        server = FedMGDAPlusServer(
+            model=model,
+            clients=clients,
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
+            num_objectives=m,
+        )
+        return FedJDTrainer(server=server, num_rounds=num_rounds)
+
+    if method == "fedavg_upgrad":
+        clients = [
+            FedJDClient(
+                client_id=i,
+                dataset=client_datasets[i],
+                batch_size=256,
+                device=device,
+                use_full_loader=True,
+                local_epochs=local_epochs,
+            )
+            for i in range(num_clients)
+        ]
+        server = FedAvgUPGradServer(
+            model=model,
+            clients=clients,
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
+        )
+        return FedJDTrainer(server=server, num_rounds=num_rounds)
+
+    if method == "fedclient_upgrad":
+        clients = [
+            FedLocalTrainClient(
+                client_id=i,
+                dataset=client_datasets[i],
+                batch_size=256,
+                device=device,
+                learning_rate=learning_rate,
+                local_epochs=local_epochs,
+            )
+            for i in range(num_clients)
+        ]
+        server = FedClientUPGradServer(
+            model=model,
+            clients=clients,
+            objective_fn=objective_fn,
+            participation_rate=participation_rate,
+            learning_rate=learning_rate,
+            device=device,
+            eval_dataset=eval_dataset,
+            update_scale=fedclient_update_scale,
+            normalize_client_updates=fedclient_normalize_updates,
+        )
+        return FedJDTrainer(server=server, num_rounds=num_rounds)
+
     if method in PHASE5_FORMAL_BASELINES:
         clients = [
             Phase5OfficialBaselineClient(
@@ -367,7 +442,8 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
 def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed,
                    device, num_rounds, num_clients, participation_rate, learning_rate,
                    model_arch, dataset, data_split, local_epochs=1,
-                   eval_dataset=None):
+                   eval_dataset=None, fedclient_update_scale: float = 1.0,
+                   fedclient_normalize_updates: bool = False):
 
     trainer = build_trainer(
         method=method, model=model, client_datasets=client_datasets,
@@ -375,6 +451,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         num_rounds=num_rounds, num_clients=num_clients,
         participation_rate=participation_rate, learning_rate=learning_rate,
         local_epochs=local_epochs, eval_dataset=eval_dataset,
+        fedclient_update_scale=fedclient_update_scale,
+        fedclient_normalize_updates=fedclient_normalize_updates,
     )
 
     start = time.time()
@@ -421,6 +499,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "upload_per_client": round(upload_per_client, 0),
         "avg_accuracy": "", "avg_f1": "", "min_task_acc": "", "min_task_f1": "",
         "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
+        "fedclient_update_scale": fedclient_update_scale if method == "fedclient_upgrad" else "",
+        "fedclient_normalize_updates": fedclient_normalize_updates if method == "fedclient_upgrad" else "",
     }
     logger.info("[%s] %s (%s): steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, total_local_steps, elapsed)
     return row

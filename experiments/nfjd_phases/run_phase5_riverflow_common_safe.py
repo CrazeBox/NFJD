@@ -49,6 +49,7 @@ def _write_csv(csv_path: Path, rows: list[dict]) -> None:
         "elapsed_time", "avg_upload_bytes", "avg_round_time", "upload_per_client",
         "public_preprocess_alpha", "public_preprocess_recompute_interval",
         "public_preprocess_steps", "public_preprocess_probe_batch_size",
+        "fedclient_update_scale", "fedclient_normalize_updates",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -70,6 +71,9 @@ def run_riverflow_common_safe(
     public_preprocess_recompute_interval: int | None,
     public_preprocess_steps: int | None,
     public_preprocess_probe_batch_size: int | None,
+    local_epochs: int,
+    fedclient_update_scale: float | None,
+    fedclient_normalize_updates: bool | None,
 ) -> dict:
     split_name = "iid" if iid else "noniid"
     suffix_parts = []
@@ -78,6 +82,10 @@ def run_riverflow_common_safe(
         suffix_parts.append(f"R{public_preprocess_recompute_interval}")
         suffix_parts.append(f"s{public_preprocess_steps}")
         suffix_parts.append(f"pb{public_preprocess_probe_batch_size}")
+    if method == "fedclient_upgrad":
+        suffix_parts.append(f"le{local_epochs}")
+        suffix_parts.append(f"scale{fedclient_update_scale:g}")
+        suffix_parts.append(f"norm{int(bool(fedclient_normalize_updates))}")
     suffix = "-" + "-".join(suffix_parts) if suffix_parts else ""
     exp_id = f"P5-rf-common-safe-{method}-{split_name}-m{num_tasks}{suffix}-seed{seed}"
 
@@ -112,8 +120,10 @@ def run_riverflow_common_safe(
             model_arch="river_flow_mlp",
             dataset="riverflow",
             data_split=split_name,
-            local_epochs=3,
+            local_epochs=local_epochs,
             eval_dataset=data["val_dataset"],
+            fedclient_update_scale=float(fedclient_update_scale or 1.0),
+            fedclient_normalize_updates=bool(fedclient_normalize_updates),
         )
         preds, targets = evaluate_model(model, data["test_dataset"], device)
         row = fill_regression_metrics(row, preds, targets, num_tasks)
@@ -121,6 +131,8 @@ def run_riverflow_common_safe(
         row["public_preprocess_recompute_interval"] = public_preprocess_recompute_interval if method == "nfjd_common_safe" else ""
         row["public_preprocess_steps"] = public_preprocess_steps if method == "nfjd_common_safe" else ""
         row["public_preprocess_probe_batch_size"] = public_preprocess_probe_batch_size if method == "nfjd_common_safe" else ""
+        row["fedclient_update_scale"] = fedclient_update_scale if method == "fedclient_upgrad" else ""
+        row["fedclient_normalize_updates"] = fedclient_normalize_updates if method == "fedclient_upgrad" else ""
         return row
     finally:
         if original_cfg is not None:
@@ -141,6 +153,10 @@ def parse_args():
     parser.add_argument("--recompute-intervals", nargs="+", type=int, default=[3, 5, 10])
     parser.add_argument("--steps", nargs="+", type=int, default=[1, 2])
     parser.add_argument("--probe-batch-sizes", nargs="+", type=int, default=[32])
+    parser.add_argument("--local-epochs", nargs="+", type=int, default=[3])
+    parser.add_argument("--baseline-local-epochs", nargs="+", type=int, default=[3])
+    parser.add_argument("--fedclient-update-scales", nargs="+", type=float, default=[1.0])
+    parser.add_argument("--fedclient-normalize-updates", nargs="+", type=int, choices=[0, 1], default=[0])
     return parser.parse_args()
 
 
@@ -172,23 +188,52 @@ def main():
                                             public_preprocess_recompute_interval=interval,
                                             public_preprocess_steps=steps,
                                             public_preprocess_probe_batch_size=probe_batch_size,
+                                            local_epochs=3,
+                                            fedclient_update_scale=None,
+                                            fedclient_normalize_updates=None,
                                         ))
+                elif method == "fedclient_upgrad":
+                    for local_epochs in args.local_epochs:
+                        for update_scale in args.fedclient_update_scales:
+                            for normalize in args.fedclient_normalize_updates:
+                                for seed in args.seeds:
+                                    experiments.append(dict(
+                                        method=method,
+                                        seed=seed,
+                                        iid=iid,
+                                        num_rounds=args.rounds,
+                                        num_clients=args.num_clients,
+                                        participation_rate=args.participation_rate,
+                                        learning_rate=args.learning_rate,
+                                        num_tasks=num_tasks,
+                                        public_preprocess_alpha=None,
+                                        public_preprocess_recompute_interval=None,
+                                        public_preprocess_steps=None,
+                                        public_preprocess_probe_batch_size=None,
+                                        local_epochs=local_epochs,
+                                        fedclient_update_scale=update_scale,
+                                        fedclient_normalize_updates=bool(normalize),
+                                    ))
                 else:
-                    for seed in args.seeds:
-                        experiments.append(dict(
-                            method=method,
-                            seed=seed,
-                            iid=iid,
-                            num_rounds=args.rounds,
-                            num_clients=args.num_clients,
-                            participation_rate=args.participation_rate,
-                            learning_rate=args.learning_rate,
-                            num_tasks=num_tasks,
-                            public_preprocess_alpha=None,
-                            public_preprocess_recompute_interval=None,
-                            public_preprocess_steps=None,
-                            public_preprocess_probe_batch_size=None,
-                        ))
+                    for local_epochs in args.baseline_local_epochs:
+                        for seed in args.seeds:
+                            experiments.append(dict(
+                                method=method,
+                                seed=seed,
+                                iid=iid,
+                                num_rounds=args.rounds,
+                                num_clients=args.num_clients,
+                                participation_rate=args.participation_rate,
+                                learning_rate=args.learning_rate,
+                                num_tasks=num_tasks,
+                                public_preprocess_alpha=None,
+                                public_preprocess_recompute_interval=None,
+                                public_preprocess_steps=None,
+                                public_preprocess_probe_batch_size=None,
+                                local_epochs=local_epochs,
+                                fedclient_update_scale=None,
+                                fedclient_normalize_updates=None,
+                            ))
 
     logger.info("Starting RiverFlow common-safe sweep: %d experiments", len(experiments))
     for idx, exp in enumerate(experiments):
