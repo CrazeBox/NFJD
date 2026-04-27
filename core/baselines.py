@@ -635,9 +635,10 @@ class QFedAvgServer:
             loss_q = loss ** self.q
             h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + (1.0 / max(self.learning_rate, self.eps)) * loss_q
             if self.mode == "official_delta":
-                # q-FFL uses a loss-weighted gradient update divided by h_i.
-                # Since delta ~= -lr * grad, -loss_q * delta is the matching gradient step numerator.
-                update_terms.append(loss_q * delta)
+                # q-FFL uses loss_q * grad_i divided by h_i. With FedAvg-style
+                # uploads, grad_i is approximated by -delta_i / local_lr.
+                # This also makes q=0 reduce to a FedAvg-scale delta update.
+                update_terms.append(loss_q * grad_proxy)
             else:
                 # Sanity/practical variant: pure loss-weighted FedAvg delta.
                 update_terms.append(loss_q * delta)
@@ -655,14 +656,14 @@ class QFedAvgServer:
             raise RuntimeError("No client contributed q-FedAvg updates.")
 
         dir_start = time.time()
-        aggregate_delta = sum(update_terms) / max(sum(h_values), self.eps)
-        direction = -aggregate_delta
+        aggregate_update = sum(update_terms) / max(sum(h_values), self.eps)
+        direction = aggregate_update if self.mode == "official_delta" else -aggregate_update
         direction_time = time.time() - dir_start
         total_nan_inf += _count_nan_inf(direction)
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat + self.update_scale * aggregate_delta
+        next_flat = current_flat - self.update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 
