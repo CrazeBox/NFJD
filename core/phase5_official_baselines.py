@@ -154,10 +154,10 @@ PHASE5_METHOD_SPECS: dict[str, Phase5MethodSpec] = {
         method="fedmgda_plus",
         display_name="FedMGDA+",
         family="federated_baseline",
-        paper_title="Federated Multi-Objective Learning (Yang et al., NeurIPS 2023)",
-        paper_url="https://arxiv.org/abs/2310.09866",
+        paper_title="Federated Learning Meets Multi-objective Optimization (Hu et al.)",
+        paper_url="https://arxiv.org/abs/2006.11489",
         official_repo="",
-        implementation_note="Communication-saving FedMGDA+ style baseline: each client computes local per-objective updates, solves a local MGDA min-norm problem, uploads one local common direction, and the server averages those directions before updating the global model.",
+        implementation_note="FedMGDA+ style baseline: clients upload FedAvg-style local deltas, and the server treats sampled clients as objectives and solves an MGDA min-norm problem to obtain a common client-descent update.",
     ),
     "fedavg_upgrad": Phase5MethodSpec(
         method="fedavg_upgrad",

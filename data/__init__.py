@@ -4,6 +4,7 @@ from .synthetic import (
     make_synthetic_federated_regression,
 )
 from .classification import FederatedData, make_federated_classification
+from .image_classification import make_federated_image_classification
 from .multimnist import make_multimnist
 from .river_flow import make_river_flow
 from .celeba import make_celeba
@@ -14,6 +15,7 @@ __all__ = [
     "make_high_conflict_federated_regression",
     "FederatedData",
     "make_federated_classification",
+    "make_federated_image_classification",
     "make_multimnist",
     "make_river_flow",
     "make_celeba",
