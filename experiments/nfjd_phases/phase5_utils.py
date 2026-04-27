@@ -441,6 +441,9 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             learning_rate=learning_rate,
             device=device,
             eval_dataset=eval_dataset,
+            q=qfedavg_q,
+            update_scale=qfedavg_update_scale,
+            mode=qfedavg_mode,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
