@@ -586,7 +586,8 @@ class QFedAvgServer:
 
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, eval_dataset=None, q: float = 0.5,
-                 eps: float = 1e-12, update_scale: float = 1.0):
+                 eps: float = 1e-12, update_scale: float = 1.0,
+                 mode: str = "official_delta"):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -597,6 +598,9 @@ class QFedAvgServer:
         self.q = float(q)
         self.eps = eps
         self.update_scale = float(update_scale)
+        if mode not in {"official_delta", "loss_weighted_delta"}:
+            raise ValueError(f"Unknown qFedAvg mode: {mode}")
+        self.mode = mode
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -618,7 +622,7 @@ class QFedAvgServer:
         total_nan_inf = 0
         max_client_mem = 0.0
         local_steps = 1
-        weighted_deltas = []
+        update_terms = []
         h_values = []
 
         client_start = time.time()
@@ -626,11 +630,18 @@ class QFedAvgServer:
             result = client.local_update(self._clone_model(), self.objective_fn)
             delta = result.delta_theta.to(self.device)
             loss = max(float(result.initial_loss), self.eps)
-            grad_proxy = -delta / max(self.learning_rate * max(getattr(client, "local_epochs", 1), 1), self.eps)
+            grad_proxy = -delta / max(self.learning_rate, self.eps)
             grad_norm_sq = float(torch.dot(grad_proxy, grad_proxy).item())
             loss_q = loss ** self.q
             h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + (1.0 / max(self.learning_rate, self.eps)) * loss_q
-            weighted_deltas.append(loss_q * grad_proxy)
+            if self.mode == "official_delta":
+                # q-FFL uses a loss-weighted gradient update divided by h_i.
+                # Since delta ~= -lr * grad, -loss_q * delta is the matching gradient step numerator.
+                update_terms.append(loss_q * delta)
+            else:
+                # Sanity/practical variant: pure loss-weighted FedAvg delta.
+                update_terms.append(loss_q * delta)
+                h_i = loss_q
             h_values.append(max(h_i, self.eps))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
@@ -640,17 +651,18 @@ class QFedAvgServer:
             local_steps = getattr(client, "local_epochs", 1)
         client_compute_time = time.time() - client_start
 
-        if not weighted_deltas:
+        if not update_terms:
             raise RuntimeError("No client contributed q-FedAvg updates.")
 
         dir_start = time.time()
-        direction = sum(weighted_deltas) / max(sum(h_values), self.eps)
+        aggregate_delta = sum(update_terms) / max(sum(h_values), self.eps)
+        direction = -aggregate_delta
         direction_time = time.time() - dir_start
         total_nan_inf += _count_nan_inf(direction)
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat - self.update_scale * direction
+        next_flat = current_flat + self.update_scale * aggregate_delta
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 

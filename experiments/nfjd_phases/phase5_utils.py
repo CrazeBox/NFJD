@@ -273,7 +273,8 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                   fmgda_update_scale: float = 1.0,
                   fedmgda_plus_update_scale: float = 1.0,
                   qfedavg_q: float = 0.5,
-                  qfedavg_update_scale: float = 1.0):
+                  qfedavg_update_scale: float = 1.0,
+                  qfedavg_mode: str = "official_delta"):
     if method in NFJD_VARIANT_CONFIGS:
         cfg = NFJD_VARIANT_CONFIGS[method]
         subset_size = cfg["stochastic_subset_size"] or min(4, m)
@@ -391,6 +392,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             eval_dataset=eval_dataset,
             q=qfedavg_q,
             update_scale=qfedavg_update_scale,
+            mode=qfedavg_mode,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -478,7 +480,8 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
                    fmgda_update_scale: float = 1.0,
                    fedmgda_plus_update_scale: float = 1.0,
                    qfedavg_q: float = 0.5,
-                   qfedavg_update_scale: float = 1.0):
+                   qfedavg_update_scale: float = 1.0,
+                   qfedavg_mode: str = "official_delta"):
 
     trainer = build_trainer(
         method=method, model=model, client_datasets=client_datasets,
@@ -492,6 +495,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         fedmgda_plus_update_scale=fedmgda_plus_update_scale,
         qfedavg_q=qfedavg_q,
         qfedavg_update_scale=qfedavg_update_scale,
+        qfedavg_mode=qfedavg_mode,
     )
 
     start = time.time()
@@ -544,6 +548,7 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "fedmgda_plus_update_scale": fedmgda_plus_update_scale if method == "fedmgda_plus" else "",
         "qfedavg_q": qfedavg_q if method == "qfedavg" else "",
         "qfedavg_update_scale": qfedavg_update_scale if method == "qfedavg" else "",
+        "qfedavg_mode": qfedavg_mode if method == "qfedavg" else "",
     }
     logger.info("[%s] %s (%s): steps=%d time=%.1fs", exp_id, spec.display_name, spec.family, total_local_steps, elapsed)
     return row

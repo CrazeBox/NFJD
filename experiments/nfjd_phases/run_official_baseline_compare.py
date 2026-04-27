@@ -48,6 +48,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "exp_id", "dataset", "dataset_note", "data_split", "protocol", "method",
         "seed", "num_rounds", "local_epochs", "num_clients", "participation_rate",
         "learning_rate", "qfedavg_q", "qfedavg_update_scale",
+        "qfedavg_mode",
         "fmgda_update_scale", "fedmgda_plus_update_scale", "fedclient_update_scale",
         "model_arch",
         "avg_accuracy", "avg_f1", "min_task_acc", "min_task_f1",
@@ -123,6 +124,7 @@ def run_one(args, dataset: str, split: str, protocol_name: str,
         fedmgda_plus_update_scale=args.fedmgda_plus_update_scale,
         qfedavg_q=args.qfedavg_q,
         qfedavg_update_scale=args.qfedavg_update_scale,
+        qfedavg_mode=args.qfedavg_mode,
     )
     start = time.time()
     history = trainer.fit()
@@ -144,6 +146,7 @@ def run_one(args, dataset: str, split: str, protocol_name: str,
         "learning_rate": args.learning_rate,
         "qfedavg_q": args.qfedavg_q if method == "qfedavg" else "",
         "qfedavg_update_scale": args.qfedavg_update_scale if method == "qfedavg" else "",
+        "qfedavg_mode": args.qfedavg_mode if method == "qfedavg" else "",
         "fmgda_update_scale": args.fmgda_update_scale if method == "fmgda" else "",
         "fedmgda_plus_update_scale": args.fedmgda_plus_update_scale if method == "fedmgda_plus" else "",
         "fedclient_update_scale": args.fedclient_update_scale if method == "fedclient_upgrad" else "",
@@ -168,6 +171,7 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--qfedavg-q", type=float, default=0.5)
     parser.add_argument("--qfedavg-update-scale", type=float, default=1.0)
+    parser.add_argument("--qfedavg-mode", choices=["official_delta", "loss_weighted_delta"], default="official_delta")
     parser.add_argument("--fmgda-update-scale", type=float, default=1.0)
     parser.add_argument("--fedmgda-plus-update-scale", type=float, default=1.0)
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
