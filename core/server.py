@@ -44,6 +44,7 @@ class RoundStats:
     is_full_sync_round: bool = True
     local_steps: int = 1
     method_name: str = "fedjd"
+    client_objective_values: list[float] = field(default_factory=list)
 
 
 def flatten_parameters(parameters) -> torch.Tensor:

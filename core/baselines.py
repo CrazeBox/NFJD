@@ -325,10 +325,12 @@ class FedMGDAPlusServer(FMGDAServer):
         per_client_upload = 0
         local_steps = 1
         client_rows = []
+        client_objectives = []
 
         for client in sampled:
             result = client.local_update(self._clone_model(), self.objective_fn)
             client_rows.append((-result.delta_theta).to(self.device))
+            client_objectives.append(float(result.initial_loss))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
             total_nan_inf += _count_nan_inf(result.delta_theta)
@@ -376,6 +378,7 @@ class FedMGDAPlusServer(FMGDAServer):
             jacobian_vs_gradient_ratio=per_client_upload / max(grad_upload, 1),
             local_steps=local_steps,
             method_name="fedmgda_plus",
+            client_objective_values=client_objectives,
         )
 
 
@@ -522,6 +525,7 @@ class FedClientUPGradServer:
         max_client_mem = 0.0
         local_steps = 1
         client_rows = []
+        client_objectives = []
 
         client_start = time.time()
         for client in sampled:
@@ -533,6 +537,7 @@ class FedClientUPGradServer:
                 if row_norm.item() > 1e-12:
                     row = row / row_norm
             client_rows.append(row)
+            client_objectives.append(float(result.initial_loss))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
             total_nan_inf += _count_nan_inf(result.delta_theta)
@@ -578,6 +583,7 @@ class FedClientUPGradServer:
             jacobian_vs_gradient_ratio=0.0,
             local_steps=local_steps,
             method_name="fedclient_upgrad",
+            client_objective_values=client_objectives,
         )
 
 
@@ -624,12 +630,14 @@ class QFedAvgServer:
         local_steps = 1
         update_terms = []
         h_values = []
+        client_objectives = []
 
         client_start = time.time()
         for client in sampled:
             result = client.local_update(self._clone_model(), self.objective_fn)
             delta = result.delta_theta.to(self.device)
             loss = max(float(result.initial_loss), self.eps)
+            client_objectives.append(loss)
             grad_proxy = -delta / max(self.learning_rate, self.eps)
             grad_norm_sq = float(torch.dot(grad_proxy, grad_proxy).item())
             loss_q = loss ** self.q
@@ -689,6 +697,7 @@ class QFedAvgServer:
             jacobian_vs_gradient_ratio=0.0,
             local_steps=local_steps,
             method_name="qfedavg",
+            client_objective_values=client_objectives,
         )
 
 

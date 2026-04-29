@@ -71,13 +71,20 @@ class FedJDTrainer:
         os.makedirs(self.output_dir / "plots", exist_ok=True)
 
     def _log_round(self, stats: RoundStats) -> None:
-        objectives = _fmt_objectives(stats.objective_values)
+        eval_objectives = _fmt_objectives(stats.objective_values)
+        if stats.client_objective_values:
+            objectives = _fmt_objectives(stats.client_objective_values)
+            eval_obj_text = f" | eval_obj=[{eval_objectives}]"
+        else:
+            objectives = eval_objectives
+            eval_obj_text = ""
         logger.info(
-            "Round %02d | sampled=%s | obj=[%s] | ||J||=%.4f | ||d||=%.4f | "
+            "Round %02d | sampled=%s | obj=[%s]%s | ||J||=%.4f | ||d||=%.4f | "
             "time=%.3fs | upload=%d B | J/grad=%.1fx | nan/inf=%d",
             stats.round_idx,
             stats.sampled_client_ids,
             objectives,
+            eval_obj_text,
             stats.jacobian_norm,
             stats.direction_norm,
             stats.round_time,
@@ -125,6 +132,9 @@ class FedJDTrainer:
             "is_full_sync_round",
             "local_steps",
             "method_name",
+            "client_objective_mean",
+            "client_objective_max",
+            "client_objective_min",
         ])
 
         csv_path = self.output_dir / "metrics.csv"
@@ -162,6 +172,9 @@ class FedJDTrainer:
                     "is_full_sync_round": s.is_full_sync_round,
                     "local_steps": s.local_steps,
                     "method_name": s.method_name,
+                    "client_objective_mean": (sum(s.client_objective_values) / len(s.client_objective_values)) if s.client_objective_values else "",
+                    "client_objective_max": max(s.client_objective_values) if s.client_objective_values else "",
+                    "client_objective_min": min(s.client_objective_values) if s.client_objective_values else "",
                 })
                 writer.writerow(row)
         logger.info("Metrics saved to %s", csv_path)
