@@ -166,6 +166,8 @@ def parse_args():
     parser.add_argument("--splits", nargs="+", choices=["iid", "noniid"], default=["iid", "noniid"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[7])
     parser.add_argument("--protocols", nargs="+", choices=["E5R100", "E1R500"], default=["E5R100", "E1R500"])
+    parser.add_argument("--rounds", type=int, default=None, help="Override preset protocols with a custom communication-round count.")
+    parser.add_argument("--local-epochs", type=int, default=None, help="Override preset protocols with a custom local epoch count.")
     parser.add_argument("--num-clients", type=int, default=10)
     parser.add_argument("--participation-rate", type=float, default=0.5)
     parser.add_argument("--learning-rate", type=float, default=0.01)
@@ -184,6 +186,11 @@ def parse_args():
 def main():
     args = parse_args()
     protocol_map = {"E5R100": (5, 100), "E1R500": (1, 500)}
+    if (args.rounds is None) ^ (args.local_epochs is None):
+        raise ValueError("--rounds and --local-epochs must be provided together for a custom protocol.")
+    if args.rounds is not None:
+        protocol_map = {f"E{args.local_epochs}R{args.rounds}": (args.local_epochs, args.rounds)}
+        args.protocols = list(protocol_map.keys())
     jobs = []
     for dataset in args.datasets:
         for split in args.splits:
