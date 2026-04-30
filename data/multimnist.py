@@ -20,6 +20,7 @@ def make_multimnist(
     seed: int = 7,
     image_size: int = 36,
     max_shift: int = 4,
+    dirichlet_alpha: float = 0.5,
 ) -> dict:
     torch.manual_seed(seed)
 
@@ -86,22 +87,22 @@ def make_multimnist(
         client_indices = [indices[i*per_client:(i+1)*per_client] for i in range(num_clients)]
     else:
         labels_for_split = train_y[:, 0].numpy()
-        min_samples_per_client = max(1, len(train_x) // (num_clients * 10))
-        dirichlet_alpha = 0.5
-        client_indices = [[] for _ in range(num_clients)]
-        for c in range(10):
-            class_idx = np.where(labels_for_split == c)[0]
-            rng.shuffle(class_idx)
-            proportions = rng.dirichlet(np.repeat(dirichlet_alpha, num_clients))
-            proportions = proportions * (1 - min_samples_per_client * num_clients / max(len(class_idx), 1))
-            proportions = np.maximum(proportions, 0)
-            proportions = proportions / proportions.sum()
-            splits = (proportions * len(class_idx)).astype(int)
-            splits[-1] = len(class_idx) - splits[:-1].sum()
-            offset = 0
-            for i in range(num_clients):
-                client_indices[i].extend(class_idx[offset:offset + splits[i]].tolist())
-                offset += splits[i]
+        min_client_size = max(10, len(train_x) // (num_clients * 100))
+        for _ in range(100):
+            client_indices = [[] for _ in range(num_clients)]
+            for c in range(10):
+                class_idx = np.where(labels_for_split == c)[0]
+                rng.shuffle(class_idx)
+                proportions = rng.dirichlet(np.repeat(dirichlet_alpha, num_clients))
+                split_points = (np.cumsum(proportions)[:-1] * len(class_idx)).astype(int)
+                for i, split in enumerate(np.split(class_idx, split_points)):
+                    client_indices[i].extend(split.tolist())
+            if min(len(idx) for idx in client_indices) >= min_client_size:
+                break
+        else:
+            raise RuntimeError("Failed to create a valid MultiMNIST Dirichlet partition.")
+        for idx in client_indices:
+            rng.shuffle(idx)
         client_indices = [torch.tensor(idx, dtype=torch.long) for idx in client_indices]
 
     client_datasets = []
