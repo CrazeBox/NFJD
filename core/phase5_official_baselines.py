@@ -524,10 +524,11 @@ class Phase5OfficialBaselineServer:
             deltas.append((result.delta_theta.to(self.device), result.num_examples / total_examples))
 
         client_compute_time = time.time() - client_start
-        aggregation_time = 0.0
+        aggregation_start = time.time()
+        aggregated_delta = sum(delta * weight for delta, weight in deltas)
+        aggregation_time = time.time() - aggregation_start
         direction_time = 0.0
 
-        aggregated_delta = sum(delta * weight for delta, weight in deltas)
         update_start = time.time()
         current_flat = current_flat + aggregated_delta
         assign_flat_parameters(self.model.parameters(), current_flat)

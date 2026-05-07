@@ -481,6 +481,97 @@ class FedLocalTrainClient:
         )
 
 
+class FedAvgServer:
+    """Plain FedAvg over FedAvg-style local model deltas."""
+
+    def __init__(self, model, clients, objective_fn, participation_rate,
+                 learning_rate, device, eval_dataset=None):
+        self.model = model.to(device)
+        self.clients = clients
+        self.objective_fn = objective_fn
+        self.participation_rate = participation_rate
+        self.learning_rate = learning_rate
+        self.device = device
+        self.eval_dataset = eval_dataset
+
+    def evaluate_global_objectives(self):
+        if self.eval_dataset is not None:
+            return evaluate_objectives_on_dataset(self.model, self.eval_dataset, self.objective_fn, self.device)
+        return _evaluate_global_objectives(self.model, self.clients, self.objective_fn, self.device)
+
+    def sample_clients(self):
+        sample_size = max(int(len(self.clients) * self.participation_rate), 1)
+        return random.sample(self.clients, sample_size)
+
+    def _clone_model(self):
+        return copy.deepcopy(self.model).to(self.device)
+
+    def run_round(self, round_idx):
+        round_start = time.time()
+        sampled = self.sample_clients()
+        sampled_ids = []
+        total_upload = 0
+        total_nan_inf = 0
+        max_client_mem = 0.0
+        local_steps = 1
+        deltas = []
+
+        client_start = time.time()
+        total_examples = sum(client.num_examples for client in sampled)
+        for client in sampled:
+            result = client.local_update(self._clone_model(), self.objective_fn)
+            sampled_ids.append(result.client_id)
+            total_upload += result.upload_bytes
+            total_nan_inf += _count_nan_inf(result.delta_theta)
+            if result.peak_memory_mb > max_client_mem:
+                max_client_mem = result.peak_memory_mb
+            local_steps = getattr(client, "local_epochs", 1)
+            deltas.append((result.delta_theta.to(self.device), result.num_examples / max(total_examples, 1)))
+        client_compute_time = time.time() - client_start
+
+        if not deltas:
+            raise RuntimeError("No client contributed FedAvg updates.")
+
+        aggregation_start = time.time()
+        aggregate_delta = sum(delta * weight for delta, weight in deltas)
+        aggregation_time = time.time() - aggregation_start
+        total_nan_inf += _count_nan_inf(aggregate_delta)
+
+        update_start = time.time()
+        current_flat = flatten_parameters(self.model.parameters())
+        next_flat = current_flat + aggregate_delta
+        assign_flat_parameters(self.model.parameters(), next_flat)
+        update_time = time.time() - update_start
+
+        model_bytes = current_flat.numel() * current_flat.element_size()
+        download_bytes = model_bytes * len(sampled)
+        per_client_upload = total_upload // max(len(sampled), 1)
+        round_time = time.time() - round_start
+
+        return RoundStats(
+            round_idx=round_idx,
+            sampled_client_ids=sampled_ids,
+            num_sampled_clients=len(sampled),
+            objective_values=self.evaluate_global_objectives(),
+            direction_norm=float(torch.norm(aggregate_delta, p=2).item()),
+            jacobian_norm=0.0,
+            round_time=round_time,
+            upload_bytes=total_upload,
+            download_bytes=download_bytes,
+            nan_inf_count=total_nan_inf,
+            client_compute_time=client_compute_time,
+            aggregation_time=aggregation_time,
+            update_time=update_time,
+            client_peak_memory_mb=max_client_mem,
+            server_peak_memory_mb=_measure_peak_memory(),
+            jacobian_upload_per_client=0,
+            gradient_upload_per_client=per_client_upload,
+            jacobian_vs_gradient_ratio=0.0,
+            local_steps=local_steps,
+            method_name="fedavg",
+        )
+
+
 class FedClientUPGradServer:
     """Server-side UPGrad over client local updates.
 

@@ -1,10 +1,16 @@
 ﻿# Experiments
 
-## NFJD Experiments
+## Current Experiments
 
 | Path | Purpose |
 |---|---|
-| `nfjd_phases/README.md` | NFJD phase index and quick commands |
+| `federated_vision/run_femnist_cifar10.py` | Current FEMNIST+CIFAR10 federated vision benchmark |
+
+## Legacy NFJD Phase Experiments
+
+| Path | Purpose |
+|---|---|
+| `nfjd_phases/README.md` | Legacy NFJD phase index and quick commands |
 | `nfjd_phases/run_phase1_baseline.py` | Phase 1 baseline comparison |
 | `nfjd_phases/run_phase2_ablation.py` | Phase 2 ablation study |
 | `nfjd_phases/run_phase3_highconflict.py` | Phase 3 high-conflict study |

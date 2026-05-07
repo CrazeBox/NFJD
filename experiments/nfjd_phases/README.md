@@ -1,4 +1,8 @@
-﻿# NFJD Phase Scripts
+# Legacy NFJD Phase Scripts
+
+This directory contains earlier phase-style experiments and baseline comparisons. They are kept for reproducibility and compatibility with existing result files.
+
+The current FEMNIST+CIFAR10 federated vision benchmark lives in `fedjd/experiments/federated_vision/` and writes results to `results/federated_vision/`.
 
 ## Main Runs
 
