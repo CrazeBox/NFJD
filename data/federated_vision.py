@@ -196,6 +196,17 @@ def _prepare_leaf_femnist(root: str) -> Path:
     if not preprocess.exists():
         raise FileNotFoundError(f"LEAF FEMNIST preprocess script not found: {preprocess}")
 
+    data_to_json = femnist_dir / "preprocess" / "data_to_json.py"
+    if data_to_json.exists():
+        text = data_to_json.read_text(encoding="utf-8")
+        legacy_token = "Image.ANTIALIAS"
+        if legacy_token in text:
+            text = text.replace(
+                legacy_token,
+                "(Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)",
+            )
+            data_to_json.write_text(text, encoding="utf-8")
+
     # LEAF FEMNIST uses writer identities as users under the non-IID split. The
     # sample flag avoids forcing the full raw FEMNIST conversion before a smoke
     # run; raise --femnist-clients if you need more writers than the sample has.
