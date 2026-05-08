@@ -235,6 +235,7 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
             max_samples_per_writer=args.max_samples_per_writer,
             use_emnist_global_test=not args.femnist_use_client_test_union_global,
             auto_prepare=not args.no_auto_prepare_femnist,
+            apply_emnist_orientation_fix=not args.no_femnist_orientation_fix,
         )
         return "femnist", "writers", data
     if scenario.startswith("cifar10_alpha"):
@@ -352,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torchvision-root", default="data/torchvision")
     parser.add_argument("--femnist-leaf-root", default="data/femnist")
     parser.add_argument("--no-auto-prepare-femnist", action="store_true")
+    parser.add_argument("--no-femnist-orientation-fix", action="store_true")
     parser.add_argument("--femnist-use-client-test-union-global", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

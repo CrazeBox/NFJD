@@ -14,6 +14,10 @@ import torch
 from torch.utils.data import Dataset, TensorDataset
 
 
+EMNIST_BYCLASS_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+EMNIST_ASCII_TO_INDEX = {ord(char): idx for idx, char in enumerate(EMNIST_BYCLASS_ALPHABET)}
+
+
 @dataclass
 class VisionFederatedData:
     client_train_datasets: list[Dataset]
@@ -35,6 +39,23 @@ class TargetColumnDataset(Dataset):
     def __getitem__(self, item: int):
         x, y = self.base_dataset[self.indices[item]]
         return x, torch.tensor([int(y)], dtype=torch.long)
+
+
+def _normalize_emnist_byclass_label(label) -> int:
+    if isinstance(label, str) and len(label) == 1 and not label.isdigit():
+        label = ord(label)
+    else:
+        label = int(label)
+    if 0 <= label < len(EMNIST_BYCLASS_ALPHABET):
+        return label
+    if label in EMNIST_ASCII_TO_INDEX:
+        return EMNIST_ASCII_TO_INDEX[label]
+    raise ValueError(f"Unsupported FEMNIST/EMNIST byclass label: {label}")
+
+
+def _emnist_raw_to_upright_tensor(x_tensor: torch.Tensor) -> torch.Tensor:
+    """Apply the same EMNIST orientation fix used for torchvision EMNIST."""
+    return torch.rot90(torch.flip(x_tensor, dims=[-2]), k=-1, dims=[-2, -1])
 
 
 def _split_indices(indices: list[int], test_fraction: float, rng: random.Random) -> tuple[list[int], list[int]]:
@@ -78,7 +99,7 @@ def _load_emnist_byclass_global_test(root: str) -> Dataset:
 
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Lambda(lambda x: torch.rot90(torch.flip(x, dims=[1]), k=-1, dims=[1, 2])),
+        transforms.Lambda(_emnist_raw_to_upright_tensor),
         transforms.Normalize((0.1736,), (0.3248,)),
     ])
     emnist_test = datasets.EMNIST(root=root, split="byclass", train=False, download=True, transform=transform)
@@ -244,7 +265,7 @@ def _load_leaf_femnist_users(root: str, auto_prepare: bool = True) -> dict[str, 
         for user in payload.get("users", []):
             entry = payload.get("user_data", {}).get(user, {})
             xs = entry.get("x", [])
-            ys = [int(y) for y in entry.get("y", [])]
+            ys = [_normalize_emnist_byclass_label(y) for y in entry.get("y", [])]
             if not xs or not ys:
                 continue
             if user not in users:
@@ -254,7 +275,7 @@ def _load_leaf_femnist_users(root: str, auto_prepare: bool = True) -> dict[str, 
     return users
 
 
-def _femnist_tensor_dataset(xs: list, ys: list[int]) -> TensorDataset:
+def _femnist_tensor_dataset(xs: list, ys: list[int], apply_emnist_orientation_fix: bool = True) -> TensorDataset:
     x_tensor = torch.tensor(xs, dtype=torch.float32)
     if x_tensor.ndim == 2 and x_tensor.shape[1] == 28 * 28:
         x_tensor = x_tensor.view(-1, 1, 28, 28)
@@ -264,8 +285,10 @@ def _femnist_tensor_dataset(xs: list, ys: list[int]) -> TensorDataset:
         x_tensor = x_tensor.permute(0, 3, 1, 2)
     if x_tensor.max().item() > 1.5:
         x_tensor = x_tensor / 255.0
+    if apply_emnist_orientation_fix:
+        x_tensor = _emnist_raw_to_upright_tensor(x_tensor)
     x_tensor = (x_tensor - 0.1736) / 0.3248
-    y_tensor = torch.tensor(ys, dtype=torch.long).view(-1, 1)
+    y_tensor = torch.tensor([_normalize_emnist_byclass_label(y) for y in ys], dtype=torch.long).view(-1, 1)
     return TensorDataset(x_tensor.contiguous(), y_tensor)
 
 
@@ -279,6 +302,7 @@ def make_femnist_writers(
     max_samples_per_writer: int | None = None,
     use_emnist_global_test: bool = True,
     auto_prepare: bool = True,
+    apply_emnist_orientation_fix: bool = True,
 ) -> VisionFederatedData:
     rng = random.Random(seed)
     users = _load_leaf_femnist_users(leaf_root, auto_prepare=auto_prepare)
@@ -304,14 +328,14 @@ def make_femnist_writers(
         train_y = [ys[i] for i in train_indices]
         test_x = [xs[i] for i in test_indices]
         test_y = [ys[i] for i in test_indices]
-        client_train.append(_femnist_tensor_dataset(train_x, train_y))
-        client_test_ds = _femnist_tensor_dataset(test_x, test_y)
+        client_train.append(_femnist_tensor_dataset(train_x, train_y, apply_emnist_orientation_fix))
+        client_test_ds = _femnist_tensor_dataset(test_x, test_y, apply_emnist_orientation_fix)
         client_test.append(client_test_ds)
         global_test_parts.append(client_test_ds)
 
     if use_emnist_global_test:
         global_test_dataset: Dataset = _load_emnist_byclass_global_test(torchvision_root)
-        dataset_note = "leaf_femnist_writer_partition_emnist_byclass_global_test"
+        dataset_note = "leaf_femnist_writer_partition_emnist_byclass_label_aligned_orientation_aligned_global_test"
     else:
         global_x = torch.cat([dataset.tensors[0] for dataset in global_test_parts], dim=0)
         global_y = torch.cat([dataset.tensors[1] for dataset in global_test_parts], dim=0)

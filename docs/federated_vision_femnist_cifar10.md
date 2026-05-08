@@ -13,7 +13,7 @@ After client assignment, every client is split into local training and local tes
 
 ## Models
 
-FEMNIST uses a compact convolutional network for 28x28 grayscale character recognition. CIFAR10 uses a ResNet-18 variant adapted to 32x32 images, with a 3x3 stride-1 first convolution and no ImageNet max-pool.
+FEMNIST uses a compact convolutional network for 28x28 grayscale character recognition. CIFAR10 uses a ResNet-18 variant adapted to 32x32 images, with a 3x3 stride-1 first convolution, no ImageNet max-pool, and GroupNorm instead of BatchNorm. GroupNorm avoids unaggregated BatchNorm running-statistics in federated non-IID training.
 
 ## Compared Methods
 
@@ -59,3 +59,5 @@ Each run writes:
 For strict writer-level FEMNIST, provide LEAF/FEMNIST JSON data via `--femnist-leaf-root`. The loader expects LEAF-style files containing `users` and `user_data` fields under `data/train`, `data/test`, `train`, `test`, or the given root. If those JSON files are missing, automatic preparation is enabled by default: the script attempts to clone `https://github.com/TalwalkarLab/leaf.git` next to `--femnist-leaf-root` and runs LEAF's FEMNIST non-IID preprocessing script. Disable this with `--no-auto-prepare-femnist`.
 
 The script does not silently substitute EMNIST class shards for FEMNIST clients because that would violate the one-writer-one-client rule. EMNIST/byclass is used only as the auxiliary standard global test set unless `--femnist-use-client-test-union-global` is set.
+
+LEAF FEMNIST labels are normalized into torchvision EMNIST/byclass label order `0-9, A-Z, a-z`; both integer labels in `[0, 61]` and ASCII labels are supported. LEAF image tensors and torchvision EMNIST tensors use the same rotate/flip orientation correction by default. Disable the LEAF-side orientation correction only for debugging with `--no-femnist-orientation-fix`.
