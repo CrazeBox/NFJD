@@ -33,7 +33,7 @@ DEFAULT_METHODS = ["fedavg", "qfedavg", "fedmgda_plus", "fedclient_upgrad"]
 SUMMARY_FIELDS = [
     "exp_id", "dataset", "dataset_note", "split", "method", "seed",
     "num_clients", "num_rounds", "local_epochs", "participation_rate", "learning_rate",
-    "mean_client_test_accuracy", "global_iid_test_accuracy", "worst10_client_accuracy",
+    "mean_client_test_accuracy", "worst10_client_accuracy",
     "client_accuracy_std", "mean_client_test_loss", "avg_round_time", "avg_upload_bytes",
     "avg_aggregation_compute_time", "max_aggregation_compute_time", "elapsed_time",
     "pareto2d_front_clients", "pareto3d_front_clients", "model_arch",
@@ -43,9 +43,9 @@ CLIENT_FIELDS = [
     "neg_test_loss", "train_size_normalized", "pareto2d", "pareto3d",
 ]
 CURVE_FIELDS = [
-    "exp_id", "round", "mean_client_test_accuracy", "global_iid_test_accuracy",
+    "exp_id", "round", "mean_client_test_accuracy",
     "worst10_client_accuracy", "client_accuracy_std", "mean_client_test_loss",
-    "global_iid_test_loss", "objective_loss", "avg_round_time_so_far",
+    "objective_loss", "avg_round_time_so_far",
     "avg_upload_bytes_so_far", "avg_aggregation_compute_time_so_far",
     "max_aggregation_compute_time_so_far",
 ]
@@ -215,7 +215,6 @@ def make_curve_row(
         device=device,
         batch_size=batch_size,
     )
-    global_acc, global_loss = evaluate_dataset(model, data.global_test_dataset, device, batch_size)
     history_metrics = summarize_history(history)
     objective_loss = math.nan
     if history:
@@ -226,11 +225,9 @@ def make_curve_row(
         "exp_id": exp_id,
         "round": round_idx,
         "mean_client_test_accuracy": client_metrics["mean_client_test_accuracy"],
-        "global_iid_test_accuracy": global_acc,
         "worst10_client_accuracy": client_metrics["worst10_client_accuracy"],
         "client_accuracy_std": client_metrics["client_accuracy_std"],
         "mean_client_test_loss": client_metrics["mean_client_test_loss"],
-        "global_iid_test_loss": global_loss,
         "objective_loss": objective_loss,
         "avg_round_time_so_far": history_metrics["avg_round_time"],
         "avg_upload_bytes_so_far": history_metrics["avg_upload_bytes"],
@@ -334,7 +331,6 @@ def plot_curves(output_dir: Path, exp_id: str, curve_rows: list[dict]) -> None:
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(rounds, [float(row["mean_client_test_accuracy"]) for row in curve_rows], label="mean client acc")
-    ax.plot(rounds, [float(row["global_iid_test_accuracy"]) for row in curve_rows], label="global IID acc")
     ax.plot(rounds, [float(row["worst10_client_accuracy"]) for row in curve_rows], label="worst 10% acc")
     ax.set_xlabel("Round")
     ax.set_ylabel("Accuracy")
@@ -346,7 +342,6 @@ def plot_curves(output_dir: Path, exp_id: str, curve_rows: list[dict]) -> None:
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(rounds, [float(row["mean_client_test_loss"]) for row in curve_rows], label="mean client loss")
-    ax.plot(rounds, [float(row["global_iid_test_loss"]) for row in curve_rows], label="global IID loss")
     ax.set_xlabel("Round")
     ax.set_ylabel("Cross-entropy loss")
     ax.set_title(f"Loss curves: {exp_id}")
@@ -453,7 +448,6 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         device=device,
         batch_size=args.eval_batch_size,
     )
-    global_acc, _global_loss = evaluate_dataset(trainer.server.model, data.global_test_dataset, device, args.eval_batch_size)
 
     save_client_rows(output_dir / f"clients_{exp_id}.csv", client_rows)
     plot_pareto(output_dir, exp_id, client_rows)
@@ -471,7 +465,6 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         "local_epochs": args.local_epochs,
         "participation_rate": args.participation_rate,
         "learning_rate": args.learning_rate,
-        "global_iid_test_accuracy": global_acc,
         "elapsed_time": elapsed,
         "model_arch": model_arch,
     }

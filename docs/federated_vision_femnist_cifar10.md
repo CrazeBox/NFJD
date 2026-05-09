@@ -9,7 +9,7 @@ The benchmark uses two standard image classification datasets.
 1. FEMNIST uses the LEAF/FEMNIST writer partition. Each writer is one federated client. Experiments sample 50 to 100 writers from the available writer pool. A writer's samples are never assigned to another client.
 2. CIFAR10 uses the torchvision CIFAR10 training split. Client partitions are generated with label-skew Dirichlet sampling at alpha=0.1 and alpha=0.5.
 
-After client assignment, every client is split into local training and local test subsets using the same fixed test fraction. Client data never crosses client boundaries. The standard IID CIFAR10 test split and the standard EMNIST/byclass test split for FEMNIST-style 62-way evaluation are used only for global-model evaluation.
+After client assignment, every client is split into local training and local test subsets using the same fixed test fraction. Client data never crosses client boundaries. Final accuracy is reported on client-held-out data to avoid mixing strict writer-level FEMNIST training with a different global EMNIST/byclass evaluation protocol.
 
 ## Models
 
@@ -24,7 +24,6 @@ The default comparison set is pure FedAvg, qFedAvg, FedMGDA+, and FedClient-UPGr
 Global performance metrics:
 
 1. Mean client test accuracy: arithmetic mean of local test accuracy over all clients.
-2. Global IID test accuracy: accuracy of the final global model on the standard IID test split.
 
 Fairness and optimality metrics:
 
