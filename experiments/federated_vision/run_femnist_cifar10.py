@@ -42,6 +42,13 @@ CLIENT_FIELDS = [
     "exp_id", "client_id", "train_samples", "test_samples", "test_accuracy", "test_loss",
     "neg_test_loss", "train_size_normalized", "pareto2d", "pareto3d",
 ]
+CURVE_FIELDS = [
+    "exp_id", "round", "mean_client_test_accuracy", "global_iid_test_accuracy",
+    "worst10_client_accuracy", "client_accuracy_std", "mean_client_test_loss",
+    "global_iid_test_loss", "objective_loss", "avg_round_time_so_far",
+    "avg_upload_bytes_so_far", "avg_aggregation_compute_time_so_far",
+    "max_aggregation_compute_time_so_far",
+]
 
 
 def set_seed(seed: int) -> None:
@@ -56,7 +63,7 @@ def build_model(dataset: str, num_classes: int):
     if dataset == "femnist":
         return FEMNISTCNN(num_tasks=1, num_classes=num_classes), "femnist_small_cnn"
     if dataset == "cifar10":
-        return CIFARResNet18MTL(num_tasks=1, num_classes=num_classes), "cifar_resnet18_3x3"
+        return CIFARResNet18MTL(num_tasks=1, num_classes=num_classes), "cifar_resnet18_3x3_groupnorm"
     raise ValueError(f"Unsupported dataset: {dataset}")
 
 
@@ -159,6 +166,119 @@ def save_client_rows(path: Path, rows: list[dict]) -> None:
             writer.writerow(row)
 
 
+def save_curve_rows(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CURVE_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def summarize_history(history) -> dict:
+    if not history:
+        return {
+            "avg_round_time": math.nan,
+            "avg_upload_bytes": math.nan,
+            "avg_aggregation_compute_time": math.nan,
+            "max_aggregation_compute_time": math.nan,
+        }
+    round_times = [float(getattr(stats, "round_time", 0.0)) for stats in history]
+    upload_bytes = [float(getattr(stats, "upload_bytes", 0.0)) for stats in history]
+    agg_times = []
+    for stats in history:
+        agg = float(getattr(stats, "aggregation_time", 0.0) or 0.0)
+        direction = float(getattr(stats, "direction_time", 0.0) or 0.0)
+        agg_times.append(agg + direction)
+    return {
+        "avg_round_time": float(np.mean(round_times)),
+        "avg_upload_bytes": float(np.mean(upload_bytes)),
+        "avg_aggregation_compute_time": float(np.mean(agg_times)),
+        "max_aggregation_compute_time": float(np.max(agg_times)),
+    }
+
+
+def make_curve_row(
+    exp_id: str,
+    round_idx: int,
+    model: torch.nn.Module,
+    data: VisionFederatedData,
+    device: torch.device,
+    batch_size: int,
+    history,
+) -> dict:
+    _client_rows, client_metrics = evaluate_clients(
+        exp_id=exp_id,
+        model=model,
+        client_train=data.client_train_datasets,
+        client_test=data.client_test_datasets,
+        device=device,
+        batch_size=batch_size,
+    )
+    global_acc, global_loss = evaluate_dataset(model, data.global_test_dataset, device, batch_size)
+    history_metrics = summarize_history(history)
+    objective_loss = math.nan
+    if history:
+        values = getattr(history[-1], "objective_values", None)
+        if values:
+            objective_loss = float(np.mean([float(value) for value in values]))
+    return {
+        "exp_id": exp_id,
+        "round": round_idx,
+        "mean_client_test_accuracy": client_metrics["mean_client_test_accuracy"],
+        "global_iid_test_accuracy": global_acc,
+        "worst10_client_accuracy": client_metrics["worst10_client_accuracy"],
+        "client_accuracy_std": client_metrics["client_accuracy_std"],
+        "mean_client_test_loss": client_metrics["mean_client_test_loss"],
+        "global_iid_test_loss": global_loss,
+        "objective_loss": objective_loss,
+        "avg_round_time_so_far": history_metrics["avg_round_time"],
+        "avg_upload_bytes_so_far": history_metrics["avg_upload_bytes"],
+        "avg_aggregation_compute_time_so_far": history_metrics["avg_aggregation_compute_time"],
+        "max_aggregation_compute_time_so_far": history_metrics["max_aggregation_compute_time"],
+    }
+
+
+def fit_with_curve_tracking(
+    trainer,
+    exp_id: str,
+    data: VisionFederatedData,
+    device: torch.device,
+    batch_size: int,
+    eval_interval: int,
+    output_dir: Path,
+) -> tuple[list, list[dict]]:
+    history = []
+    curve_rows: list[dict] = []
+
+    initial_objectives = trainer.server.evaluate_global_objectives()
+    trainer.initial_objectives = initial_objectives
+    if hasattr(trainer.server, "set_initial_objectives"):
+        trainer.server.set_initial_objectives(initial_objectives)
+    LOGGER.info("Initial objectives: %s", ", ".join(f"{value:.4f}" for value in initial_objectives))
+
+    if eval_interval > 0:
+        curve_rows.append(make_curve_row(exp_id, 0, trainer.server.model, data, device, batch_size, history))
+        save_curve_rows(output_dir / f"curves_{exp_id}.csv", curve_rows)
+
+    for round_idx in range(trainer.num_rounds):
+        stats = trainer.server.run_round(round_idx)
+        history.append(stats)
+        LOGGER.info(
+            "Round %03d | sampled=%s | time=%.3fs | upload=%d B",
+            round_idx,
+            stats.sampled_client_ids,
+            stats.round_time,
+            stats.upload_bytes,
+        )
+        completed_round = round_idx + 1
+        if eval_interval > 0 and (completed_round % eval_interval == 0 or completed_round == trainer.num_rounds):
+            curve_rows.append(make_curve_row(exp_id, completed_round, trainer.server.model, data, device, batch_size, history))
+            save_curve_rows(output_dir / f"curves_{exp_id}.csv", curve_rows)
+            LOGGER.info("Curve eval round %d written for %s", completed_round, exp_id)
+    return history, curve_rows
+
+
 def plot_pareto(output_dir: Path, exp_id: str, client_rows: list[dict]) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -200,27 +320,52 @@ def plot_pareto(output_dir: Path, exp_id: str, client_rows: list[dict]) -> None:
     plt.close(fig)
 
 
-def summarize_history(history) -> dict:
-    if not history:
-        return {
-            "avg_round_time": math.nan,
-            "avg_upload_bytes": math.nan,
-            "avg_aggregation_compute_time": math.nan,
-            "max_aggregation_compute_time": math.nan,
-        }
-    round_times = [float(getattr(stats, "round_time", 0.0)) for stats in history]
-    upload_bytes = [float(getattr(stats, "upload_bytes", 0.0)) for stats in history]
-    agg_times = []
-    for stats in history:
-        agg = float(getattr(stats, "aggregation_time", 0.0) or 0.0)
-        direction = float(getattr(stats, "direction_time", 0.0) or 0.0)
-        agg_times.append(agg + direction)
-    return {
-        "avg_round_time": float(np.mean(round_times)),
-        "avg_upload_bytes": float(np.mean(upload_bytes)),
-        "avg_aggregation_compute_time": float(np.mean(agg_times)),
-        "max_aggregation_compute_time": float(np.max(agg_times)),
-    }
+def plot_curves(output_dir: Path, exp_id: str, curve_rows: list[dict]) -> None:
+    if not curve_rows:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        LOGGER.warning("matplotlib is unavailable; skipping curve plots for %s", exp_id)
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rounds = [int(row["round"]) for row in curve_rows]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(rounds, [float(row["mean_client_test_accuracy"]) for row in curve_rows], label="mean client acc")
+    ax.plot(rounds, [float(row["global_iid_test_accuracy"]) for row in curve_rows], label="global IID acc")
+    ax.plot(rounds, [float(row["worst10_client_accuracy"]) for row in curve_rows], label="worst 10% acc")
+    ax.set_xlabel("Round")
+    ax.set_ylabel("Accuracy")
+    ax.set_title(f"Accuracy curves: {exp_id}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / f"curve_accuracy_{exp_id}.png", dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(rounds, [float(row["mean_client_test_loss"]) for row in curve_rows], label="mean client loss")
+    ax.plot(rounds, [float(row["global_iid_test_loss"]) for row in curve_rows], label="global IID loss")
+    ax.set_xlabel("Round")
+    ax.set_ylabel("Cross-entropy loss")
+    ax.set_title(f"Loss curves: {exp_id}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / f"curve_loss_{exp_id}.png", dpi=180)
+    plt.close(fig)
+
+    fig, ax1 = plt.subplots(figsize=(7, 5))
+    ax1.plot(rounds, [float(row["worst10_client_accuracy"]) for row in curve_rows], label="worst 10% acc", color="tab:blue")
+    ax1.set_xlabel("Round")
+    ax1.set_ylabel("Worst 10% accuracy", color="tab:blue")
+    ax2 = ax1.twinx()
+    ax2.plot(rounds, [float(row["client_accuracy_std"]) for row in curve_rows], label="client acc std", color="tab:red")
+    ax2.set_ylabel("Client accuracy std", color="tab:red")
+    fig.suptitle(f"Fairness curves: {exp_id}")
+    fig.tight_layout()
+    fig.savefig(output_dir / f"curve_fairness_{exp_id}.png", dpi=180)
+    plt.close(fig)
 
 
 def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
@@ -257,7 +402,8 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
     set_seed(args.seed)
     dataset_name, split_name, data = load_scenario(args, scenario)
     model, model_arch = build_model(dataset_name, data.num_classes)
-    model = model.to(args.device)
+    device = torch.device(args.device)
+    model = model.to(device)
     exp_id = f"fv-{dataset_name}-{split_name}-{method}-seed{args.seed}"
     LOGGER.info("Running %s", exp_id)
 
@@ -268,7 +414,7 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         objective_fn=multi_task_classification,
         m=1,
         seed=args.seed,
-        device=torch.device(args.device),
+        device=device,
         num_rounds=args.num_rounds,
         num_clients=len(data.client_train_datasets),
         participation_rate=args.participation_rate,
@@ -283,7 +429,19 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
     )
 
     start = time.time()
-    history = trainer.fit()
+    if args.eval_interval > 0:
+        history, curve_rows = fit_with_curve_tracking(
+            trainer=trainer,
+            exp_id=exp_id,
+            data=data,
+            device=device,
+            batch_size=args.eval_batch_size,
+            eval_interval=args.eval_interval,
+            output_dir=output_dir,
+        )
+    else:
+        history = trainer.fit()
+        curve_rows = []
     elapsed = time.time() - start
     history_metrics = summarize_history(history)
 
@@ -292,18 +450,14 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         model=trainer.server.model,
         client_train=data.client_train_datasets,
         client_test=data.client_test_datasets,
-        device=torch.device(args.device),
+        device=device,
         batch_size=args.eval_batch_size,
     )
-    global_acc, _global_loss = evaluate_dataset(
-        trainer.server.model,
-        data.global_test_dataset,
-        torch.device(args.device),
-        args.eval_batch_size,
-    )
+    global_acc, _global_loss = evaluate_dataset(trainer.server.model, data.global_test_dataset, device, args.eval_batch_size)
 
     save_client_rows(output_dir / f"clients_{exp_id}.csv", client_rows)
     plot_pareto(output_dir, exp_id, client_rows)
+    plot_curves(output_dir, exp_id, curve_rows)
 
     row = {
         "exp_id": exp_id,
@@ -356,6 +510,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-femnist-orientation-fix", action="store_true")
     parser.add_argument("--femnist-use-client-test-union-global", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
+    parser.add_argument("--eval-interval", type=int, default=25)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="results/federated_vision")
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
