@@ -34,6 +34,9 @@ class ShakespeareFederatedData:
     sequence_length: int
     num_clients: int
     dataset_note: str
+    client_names: list[str]
+    train_sizes: list[int]
+    test_sizes: list[int]
 
 
 def _leaf_json_files(root: Path) -> list[Path]:
@@ -121,12 +124,12 @@ def _is_speaker_line(line: str) -> bool:
     return bool(_SPEAKER_RE.match(text)) and any(char.isalpha() for char in stripped)
 
 
-def _load_raw_text_users(root: Path, sequence_length: int) -> dict[str, tuple[list[str], list[str]]]:
+def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
     raw_path = next((path for path in _raw_text_candidates(root) if path.is_file()), None)
     if raw_path is None:
         return {}
 
-    logger.warning("LEAF Shakespeare JSON is empty or missing; parsing raw text directly from %s", raw_path)
+    logger.warning("Building custom Shakespeare speaker clients from raw text: %s", raw_path)
     text = raw_path.read_text(encoding="utf-8", errors="replace")
     speaker_chunks: dict[str, list[str]] = {}
     current_speaker: str | None = None
@@ -164,24 +167,21 @@ def _load_raw_text_users(root: Path, sequence_length: int) -> dict[str, tuple[li
             continue
         xs = []
         ys = []
-        for start in range(0, len(speaker_text) - sequence_length, sequence_length):
+        for start in range(0, len(speaker_text) - sequence_length, max(stride, 1)):
             xs.append(speaker_text[start:start + sequence_length])
             ys.append(speaker_text[start + sequence_length])
         if xs:
             users[speaker] = (xs, ys)
-    logger.warning("Parsed %d Shakespeare speaker clients directly from raw text.", len(users))
+    logger.warning("Built %d custom Shakespeare speaker clients from raw text.", len(users))
     return users
 
 
-def _load_leaf_users(root: Path, auto_prepare: bool, sequence_length: int) -> dict[str, tuple[list[str], list[str]]]:
+def _load_leaf_users(root: Path, auto_prepare: bool) -> dict[str, tuple[list[str], list[str]]]:
     data_root = _prepare_leaf_shakespeare(root) if auto_prepare else root
     files = _leaf_json_files(data_root)
     if not files:
-        users = _load_raw_text_users(data_root, sequence_length) or _load_raw_text_users(root, sequence_length)
-        if users:
-            return users
         raise FileNotFoundError(
-            "Shakespeare requires LEAF JSON files with users/user_data fields or raw_data.txt. "
+            "Shakespeare requires LEAF JSON files with users/user_data fields. "
             f"Checked {data_root}. See docs/shakespeare_client_objectives.md for manual preparation."
         )
 
@@ -201,7 +201,40 @@ def _load_leaf_users(root: Path, auto_prepare: bool, sequence_length: int) -> di
             users[user][1].extend(str(y) for y in ys)
     if users:
         return users
-    return _load_raw_text_users(data_root, sequence_length) or _load_raw_text_users(root, sequence_length)
+    return {}
+
+
+def _load_shakespeare_users(
+    root: Path,
+    auto_prepare: bool,
+    sequence_length: int,
+    stride: int,
+    source: str,
+) -> tuple[dict[str, tuple[list[str], list[str]]], str]:
+    source = source.lower()
+    if source not in {"auto", "leaf", "custom"}:
+        raise ValueError("source must be one of: auto, leaf, custom")
+
+    if source in {"auto", "leaf"}:
+        try:
+            users = _load_leaf_users(root, auto_prepare=auto_prepare)
+        except FileNotFoundError:
+            if source == "leaf":
+                raise
+            users = {}
+        if users:
+            return users, "leaf_json"
+        if source == "leaf":
+            raise RuntimeError("LEAF Shakespeare JSON files were found but contained zero usable clients.")
+        logger.warning("LEAF Shakespeare JSON is empty or missing; falling back to custom raw-text construction.")
+
+    users = _load_raw_text_users(root, sequence_length=sequence_length, stride=stride)
+    if not users:
+        raise FileNotFoundError(
+            "Could not build Shakespeare clients. Provide LEAF JSON files or raw_data.txt under "
+            f"{root}/data/raw_data/raw_data.txt."
+        )
+    return users, "custom_raw_speaker_stride"
 
 
 def _build_vocab(users: dict[str, tuple[list[str], list[str]]]) -> dict[str, int]:
@@ -249,22 +282,39 @@ def make_shakespeare(
     max_samples_per_client: int | None = 2000,
     test_fraction: float = 0.2,
     sequence_length: int = 80,
+    stride: int = 5,
+    source: str = "auto",
+    select_top_clients: bool = True,
 ) -> ShakespeareFederatedData:
     rng = random.Random(seed)
     root_path = resolve_project_path(root) if root is not None else SHAKESPEARE_DIR
-    users = _load_leaf_users(root_path, auto_prepare=auto_prepare, sequence_length=sequence_length)
+    users, source_note = _load_shakespeare_users(
+        root_path,
+        auto_prepare=auto_prepare,
+        sequence_length=sequence_length,
+        stride=stride,
+        source=source,
+    )
     eligible = [user for user, (xs, ys) in users.items() if len(xs) >= min_samples_per_client and len(xs) == len(ys)]
     if len(eligible) < num_clients:
+        largest = sorted((len(users[user][0]), user) for user in users)[-10:]
         raise RuntimeError(
-            f"Shakespeare has only {len(eligible)} eligible clients, fewer than requested num_clients={num_clients}."
+            f"Shakespeare has only {len(eligible)} eligible clients with at least {min_samples_per_client} samples, "
+            f"fewer than requested num_clients={num_clients}. Largest clients: {largest}"
         )
-    rng.shuffle(eligible)
-    selected = eligible[:num_clients]
+    if select_top_clients:
+        selected = sorted(eligible, key=lambda user: len(users[user][0]), reverse=True)[:num_clients]
+    else:
+        rng.shuffle(eligible)
+        selected = eligible[:num_clients]
+    rng.shuffle(selected)
     selected_users = {user: users[user] for user in selected}
     vocab = _build_vocab(selected_users)
 
     train_datasets: list[Dataset] = []
     test_datasets: list[Dataset] = []
+    train_sizes: list[int] = []
+    test_sizes: list[int] = []
     for client_id, user in enumerate(selected):
         xs, ys = users[user]
         indices = list(range(len(xs)))
@@ -286,10 +336,24 @@ def make_shakespeare(
         test_datasets.append(
             _encode_user_dataset([xs[i] for i in test_idx], [ys[i] for i in test_idx], vocab, client_id, sequence_length)
         )
+        train_sizes.append(len(train_idx))
+        test_sizes.append(len(test_idx))
 
     logger.info(
-        "Loaded Shakespeare: %d clients, vocab=%d, seq_len=%d, root=%s",
-        num_clients, len(vocab), sequence_length, root_path,
+        "Loaded Shakespeare: source=%s, clients=%d, vocab=%d, seq_len=%d, stride=%d, "
+        "train min/median/max=%d/%d/%d, test min/median/max=%d/%d/%d, root=%s",
+        source_note,
+        num_clients,
+        len(vocab),
+        sequence_length,
+        stride,
+        min(train_sizes),
+        sorted(train_sizes)[len(train_sizes) // 2],
+        max(train_sizes),
+        min(test_sizes),
+        sorted(test_sizes)[len(test_sizes) // 2],
+        max(test_sizes),
+        root_path,
     )
     return ShakespeareFederatedData(
         client_train_datasets=train_datasets,
@@ -298,5 +362,8 @@ def make_shakespeare(
         vocab=vocab,
         sequence_length=sequence_length,
         num_clients=num_clients,
-        dataset_note="leaf_shakespeare_speaker_client_objectives",
+        dataset_note=f"shakespeare_{source_note}_client_objectives",
+        client_names=selected,
+        train_sizes=train_sizes,
+        test_sizes=test_sizes,
     )

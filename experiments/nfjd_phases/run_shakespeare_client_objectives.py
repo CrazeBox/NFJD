@@ -32,9 +32,10 @@ SUMMARY_FIELDS = [
     "local_epochs", "participation_rate", "learning_rate", "model_arch", "vocab_size",
     "sequence_length", "mean_client_accuracy", "worst10_client_accuracy", "client_accuracy_std",
     "mean_client_loss", "worst10_client_loss", "client_loss_std", "avg_round_time",
-    "avg_upload_bytes", "elapsed_time",
+    "avg_upload_bytes", "elapsed_time", "train_samples_total", "test_samples_total",
+    "train_samples_min", "train_samples_median", "test_samples_min", "test_samples_median",
 ]
-CLIENT_FIELDS = ["exp_id", "client_id", "test_samples", "test_accuracy", "test_loss"]
+CLIENT_FIELDS = ["exp_id", "client_id", "client_name", "train_samples", "test_samples", "test_accuracy", "test_loss"]
 
 
 def set_seed(seed: int) -> None:
@@ -84,7 +85,9 @@ def evaluate_client(model: torch.nn.Module, dataset: Dataset, device: torch.devi
 def evaluate_clients(
     exp_id: str,
     model: torch.nn.Module,
+    client_train_datasets: list[Dataset],
     client_test_datasets: list[Dataset],
+    client_names: list[str],
     device: torch.device,
     batch_size: int,
 ) -> tuple[list[dict], dict]:
@@ -94,6 +97,8 @@ def evaluate_clients(
         rows.append({
             "exp_id": exp_id,
             "client_id": client_id,
+            "client_name": client_names[client_id] if client_id < len(client_names) else str(client_id),
+            "train_samples": len(client_train_datasets[client_id]),
             "test_samples": len(dataset),
             "test_accuracy": accuracy,
             "test_loss": loss,
@@ -131,6 +136,9 @@ def run_one(args: argparse.Namespace, method: str, output_dir: Path) -> dict:
         max_samples_per_client=args.max_samples_per_client,
         test_fraction=args.client_test_fraction,
         sequence_length=args.sequence_length,
+        stride=args.sequence_stride,
+        source=args.shakespeare_source,
+        select_top_clients=not args.random_clients,
     )
     device = torch.device(args.device)
     model = CharLSTM(
@@ -170,7 +178,9 @@ def run_one(args: argparse.Namespace, method: str, output_dir: Path) -> dict:
     client_rows, client_metrics = evaluate_clients(
         exp_id=exp_id,
         model=trainer.server.model,
+        client_train_datasets=data.client_train_datasets,
         client_test_datasets=data.client_test_datasets,
+        client_names=data.client_names,
         device=device,
         batch_size=args.eval_batch_size,
     )
@@ -193,6 +203,12 @@ def run_one(args: argparse.Namespace, method: str, output_dir: Path) -> dict:
         "avg_round_time": round_summary["avg_round_time"],
         "avg_upload_bytes": round_summary["avg_upload_bytes"],
         "elapsed_time": elapsed,
+        "train_samples_total": sum(data.train_sizes),
+        "test_samples_total": sum(data.test_sizes),
+        "train_samples_min": min(data.train_sizes),
+        "train_samples_median": float(np.median(data.train_sizes)),
+        "test_samples_min": min(data.test_sizes),
+        "test_samples_median": float(np.median(data.test_sizes)),
     }
     row.update(client_metrics)
     return row
@@ -211,6 +227,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-samples-per-client", type=int, default=64)
     parser.add_argument("--max-samples-per-client", type=int, default=2000)
     parser.add_argument("--sequence-length", type=int, default=80)
+    parser.add_argument("--sequence-stride", type=int, default=5)
+    parser.add_argument("--shakespeare-source", choices=["auto", "custom", "leaf"], default="auto")
+    parser.add_argument("--random-clients", action="store_true")
     parser.add_argument("--embedding-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--eval-batch-size", type=int, default=256)
