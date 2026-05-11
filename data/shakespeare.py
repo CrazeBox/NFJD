@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -17,6 +18,11 @@ from fedjd.paths import data_path, resolve_project_path
 logger = logging.getLogger(__name__)
 
 SHAKESPEARE_DIR = data_path("shakespeare")
+_SPEAKER_RE = re.compile(r"^[A-Z][A-Z .'-]{1,48}\.?$")
+_NON_SPEAKER_HEADINGS = {
+    "ACT", "SCENE", "THE END", "DRAMATIS PERSONAE", "THE SONNETS", "A LOVER'S COMPLAINT",
+    "VENUS AND ADONIS", "THE RAPE OF LUCRECE", "THE PASSIONATE PILGRIM",
+}
 
 
 @dataclass
@@ -92,14 +98,91 @@ def _prepare_leaf_shakespeare(root: Path) -> Path:
     )
 
 
-def _load_leaf_users(root: Path, auto_prepare: bool) -> dict[str, tuple[list[str], list[str]]]:
+def _raw_text_candidates(root: Path) -> list[Path]:
+    return [
+        root / "data" / "raw_data" / "raw_data.txt",
+        root / "raw_data" / "raw_data.txt",
+        root / "data" / "raw_data.txt",
+        root / "raw_data.txt",
+    ]
+
+
+def _is_speaker_line(line: str) -> bool:
+    text = line.strip()
+    if not text or len(text) > 50:
+        return False
+    stripped = text.rstrip(".")
+    if stripped in _NON_SPEAKER_HEADINGS:
+        return False
+    if stripped.startswith(("ACT ", "SCENE ", "THE ", "PROJECT GUTENBERG")):
+        return False
+    if any(char.isdigit() for char in stripped):
+        return False
+    return bool(_SPEAKER_RE.match(text)) and any(char.isalpha() for char in stripped)
+
+
+def _load_raw_text_users(root: Path, sequence_length: int) -> dict[str, tuple[list[str], list[str]]]:
+    raw_path = next((path for path in _raw_text_candidates(root) if path.is_file()), None)
+    if raw_path is None:
+        return {}
+
+    logger.warning("LEAF Shakespeare JSON is empty or missing; parsing raw text directly from %s", raw_path)
+    text = raw_path.read_text(encoding="utf-8", errors="replace")
+    speaker_chunks: dict[str, list[str]] = {}
+    current_speaker: str | None = None
+    current_lines: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_lines
+        if current_speaker is None or not current_lines:
+            current_lines = []
+            return
+        chunk = " ".join(line.strip() for line in current_lines if line.strip())
+        if chunk:
+            speaker_chunks.setdefault(current_speaker, []).append(chunk)
+        current_lines = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("[", "(")) and stripped.endswith(("]", ")")):
+            continue
+        if _is_speaker_line(stripped):
+            flush_current()
+            current_speaker = stripped.rstrip(".").replace(" ", "_")
+            continue
+        if current_speaker is not None:
+            current_lines.append(stripped)
+    flush_current()
+
+    users: dict[str, tuple[list[str], list[str]]] = {}
+    for speaker, chunks in speaker_chunks.items():
+        speaker_text = " ".join(chunks)
+        speaker_text = re.sub(r"\s+", " ", speaker_text).strip()
+        if len(speaker_text) <= sequence_length:
+            continue
+        xs = []
+        ys = []
+        for start in range(0, len(speaker_text) - sequence_length, sequence_length):
+            xs.append(speaker_text[start:start + sequence_length])
+            ys.append(speaker_text[start + sequence_length])
+        if xs:
+            users[speaker] = (xs, ys)
+    logger.warning("Parsed %d Shakespeare speaker clients directly from raw text.", len(users))
+    return users
+
+
+def _load_leaf_users(root: Path, auto_prepare: bool, sequence_length: int) -> dict[str, tuple[list[str], list[str]]]:
     data_root = _prepare_leaf_shakespeare(root) if auto_prepare else root
     files = _leaf_json_files(data_root)
     if not files:
+        users = _load_raw_text_users(data_root, sequence_length) or _load_raw_text_users(root, sequence_length)
+        if users:
+            return users
         raise FileNotFoundError(
-            "Shakespeare requires LEAF JSON files with users/user_data fields. "
-            f"Pass --shakespeare-root pointing to prepared LEAF data. Checked {data_root}. "
-            "See docs/shakespeare_client_objectives.md for manual preparation."
+            "Shakespeare requires LEAF JSON files with users/user_data fields or raw_data.txt. "
+            f"Checked {data_root}. See docs/shakespeare_client_objectives.md for manual preparation."
         )
 
     users: dict[str, tuple[list[str], list[str]]] = {}
@@ -116,7 +199,9 @@ def _load_leaf_users(root: Path, auto_prepare: bool) -> dict[str, tuple[list[str
                 users[user] = ([], [])
             users[user][0].extend(str(x) for x in xs)
             users[user][1].extend(str(y) for y in ys)
-    return users
+    if users:
+        return users
+    return _load_raw_text_users(data_root, sequence_length) or _load_raw_text_users(root, sequence_length)
 
 
 def _build_vocab(users: dict[str, tuple[list[str], list[str]]]) -> dict[str, int]:
@@ -167,7 +252,7 @@ def make_shakespeare(
 ) -> ShakespeareFederatedData:
     rng = random.Random(seed)
     root_path = resolve_project_path(root) if root is not None else SHAKESPEARE_DIR
-    users = _load_leaf_users(root_path, auto_prepare=auto_prepare)
+    users = _load_leaf_users(root_path, auto_prepare=auto_prepare, sequence_length=sequence_length)
     eligible = [user for user, (xs, ys) in users.items() if len(xs) >= min_samples_per_client and len(xs) == len(ys)]
     if len(eligible) < num_clients:
         raise RuntimeError(
