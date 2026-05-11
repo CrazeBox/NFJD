@@ -6,6 +6,8 @@ from pathlib import Path
 import torch
 from torch.utils.data import ConcatDataset, Subset, TensorDataset
 
+from fedjd.paths import resolve_project_path
+
 
 def _load_torchvision_dataset(name: str, root: str, train: bool):
     try:
@@ -13,12 +15,14 @@ def _load_torchvision_dataset(name: str, root: str, train: bool):
     except ModuleNotFoundError as exc:
         raise ImportError("CIFAR10/FEMNIST experiments require torchvision.") from exc
 
+    root_path = resolve_project_path(root)
+
     if name == "cifar10":
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
         ])
-        return datasets.CIFAR10(root=root, train=train, download=True, transform=transform), 10, 3
+        return datasets.CIFAR10(root=str(root_path), train=train, download=True, transform=transform), 10, 3
     if name == "femnist":
         # Torchvision does not expose LEAF writer partitions. EMNIST/byclass is
         # the closest built-in source for FEMNIST-style 62-way character data;
@@ -28,7 +32,7 @@ def _load_torchvision_dataset(name: str, root: str, train: bool):
             transforms.Lambda(lambda x: torch.rot90(torch.flip(x, dims=[1]), k=-1, dims=[1, 2])),
             transforms.Normalize((0.1736,), (0.3248,)),
         ])
-        return datasets.EMNIST(root=root, split="byclass", train=train, download=True, transform=transform), 62, 1
+        return datasets.EMNIST(root=str(root_path), split="byclass", train=train, download=True, transform=transform), 62, 1
     raise ValueError(f"Unsupported image dataset: {name}")
 
 

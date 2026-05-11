@@ -7,10 +7,11 @@ import torch
 import torchvision
 from torch.utils.data import TensorDataset
 
+from fedjd.paths import data_path, resolve_project_path
+
 logger = logging.getLogger(__name__)
 
-MULTIMNIST_DIR = Path("data/multimnist")
-MULTIMNIST_DIR.mkdir(parents=True, exist_ok=True)
+MULTIMNIST_DIR = data_path("multimnist")
 
 
 def make_multimnist(
@@ -21,13 +22,17 @@ def make_multimnist(
     image_size: int = 36,
     max_shift: int = 4,
     dirichlet_alpha: float = 0.5,
+    root: str | Path | None = None,
 ) -> dict:
     torch.manual_seed(seed)
 
+    mnist_root = resolve_project_path(root) if root is not None else MULTIMNIST_DIR
+    mnist_root.mkdir(parents=True, exist_ok=True)
+
     train_dataset = torchvision.datasets.MNIST(
-        root=str(MULTIMNIST_DIR), train=True, download=True)
+        root=str(mnist_root), train=True, download=True)
     test_dataset = torchvision.datasets.MNIST(
-        root=str(MULTIMNIST_DIR), train=False, download=True)
+        root=str(mnist_root), train=False, download=True)
 
     train_images = train_dataset.data.float() / 255.0
     train_labels = train_dataset.targets

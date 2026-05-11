@@ -12,12 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from fedjd.data.celeba import make_celeba
 from fedjd.models.celeba_cnn import CelebaCNN
+from fedjd.paths import resolve_project_path, results_path
 from fedjd.problems import multi_task_binary_classification
 from fedjd.experiments.nfjd_phases.phase5_utils import (
     run_experiment, evaluate_model, fill_classification_metrics, write_csv, cleanup,
 )
 
-RESULTS_DIR = Path("results/nfjd_phase5/celeba")
+RESULTS_DIR = results_path("nfjd_phase5", "celeba")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 SEEDS = [7, 42, 123]
 METHODS = ["nfjd", "fmgda", "fedavg_ls", "fedavg_pcgrad", "fedavg_cagrad"]
-CELEBA_ROOT = os.environ.get("CELEBA_ROOT", str(Path("data/celeba")))
+CELEBA_ROOT = str(resolve_project_path(os.environ.get("CELEBA_ROOT", "data/celeba")))
 
 
 def run_celeba(method, seed, iid=True, num_rounds=50,

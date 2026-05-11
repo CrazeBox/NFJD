@@ -13,6 +13,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, TensorDataset
 
+from fedjd.paths import resolve_project_path
+
 
 EMNIST_BYCLASS_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 EMNIST_ASCII_TO_INDEX = {ord(char): idx for idx, char in enumerate(EMNIST_BYCLASS_ALPHABET)}
@@ -26,6 +28,8 @@ class VisionFederatedData:
     num_classes: int
     input_channels: int
     dataset_note: str
+    num_tasks: int = 1
+    task_type: str = "multiclass"
 
 
 class TargetColumnDataset(Dataset):
@@ -86,8 +90,9 @@ def _load_cifar10(root: str):
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
     ])
-    train_set = datasets.CIFAR10(root=root, train=True, download=True, transform=transform)
-    test_set = datasets.CIFAR10(root=root, train=False, download=True, transform=transform)
+    root_path = resolve_project_path(root)
+    train_set = datasets.CIFAR10(root=str(root_path), train=True, download=True, transform=transform)
+    test_set = datasets.CIFAR10(root=str(root_path), train=False, download=True, transform=transform)
     return train_set, test_set
 
 
@@ -102,7 +107,8 @@ def _load_emnist_byclass_global_test(root: str) -> Dataset:
         transforms.Lambda(_emnist_raw_to_upright_tensor),
         transforms.Normalize((0.1736,), (0.3248,)),
     ])
-    emnist_test = datasets.EMNIST(root=root, split="byclass", train=False, download=True, transform=transform)
+    root_path = resolve_project_path(root)
+    emnist_test = datasets.EMNIST(root=str(root_path), split="byclass", train=False, download=True, transform=transform)
     return TargetColumnDataset(emnist_test, range(len(emnist_test)))
 
 
@@ -192,7 +198,7 @@ def _leaf_json_files(root: Path) -> list[Path]:
 
 
 def _prepare_leaf_femnist(root: str) -> Path:
-    root_path = Path(root)
+    root_path = resolve_project_path(root)
     if _leaf_json_files(root_path):
         return root_path
 
@@ -247,7 +253,7 @@ def _prepare_leaf_femnist(root: str) -> Path:
 
 
 def _load_leaf_femnist_users(root: str, auto_prepare: bool = True) -> dict[str, tuple[list, list[int]]]:
-    root_path = Path(root)
+    root_path = resolve_project_path(root)
     if auto_prepare:
         root_path = _prepare_leaf_femnist(root)
     files = _leaf_json_files(root_path)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -23,10 +23,13 @@ from fedjd.data.federated_vision import (  # noqa: E402
     make_cifar10_dirichlet,
     make_femnist_writers,
 )
+from fedjd.data.celeba import make_celeba  # noqa: E402
 from fedjd.experiments.nfjd_phases.phase5_utils import build_trainer  # noqa: E402
 from fedjd.models.basic_cnn_mtl import BasicCNNMTL  # noqa: E402
+from fedjd.models.celeba_cnn import CelebaCNN  # noqa: E402
 from fedjd.models.femnist_cnn import FEMNISTCNN  # noqa: E402
-from fedjd.problems.classification import multi_task_classification  # noqa: E402
+from fedjd.paths import resolve_project_path  # noqa: E402
+from fedjd.problems.classification import multi_task_binary_classification, multi_task_classification  # noqa: E402
 
 LOGGER = logging.getLogger("federated_vision")
 DEFAULT_METHODS = ["fedavg", "qfedavg", "fedmgda_plus", "fedclient_upgrad"]
@@ -64,7 +67,15 @@ def build_model(dataset: str, num_classes: int):
         return FEMNISTCNN(num_tasks=1, num_classes=num_classes), "femnist_small_cnn"
     if dataset == "cifar10":
         return BasicCNNMTL(input_channels=3, num_tasks=1, num_classes=num_classes), "cifar_basic_cnn"
+    if dataset == "celeba":
+        return CelebaCNN(num_attributes=num_classes), "celeba_cnn"
     raise ValueError(f"Unsupported dataset: {dataset}")
+
+
+def objective_for_data(data: VisionFederatedData):
+    if data.task_type == "binary_multitask":
+        return multi_task_binary_classification
+    return multi_task_classification
 
 
 def logits_for_single_task(predictions: torch.Tensor) -> torch.Tensor:
@@ -83,12 +94,20 @@ def evaluate_dataset(model: torch.nn.Module, dataset: Dataset, device: torch.dev
         for bx, by in loader:
             bx = bx.to(device)
             by = by.to(device)
-            labels = by[:, 0].long() if by.ndim > 1 else by.long()
-            logits = logits_for_single_task(model(bx))
-            loss = torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
-            pred = torch.argmax(logits, dim=1)
-            correct += int((pred == labels).sum().item())
-            total += int(labels.numel())
+            outputs = model(bx)
+            if outputs.ndim == 2 and by.ndim > 1 and outputs.shape == by.shape:
+                targets = by.float()
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs, targets, reduction="sum")
+                pred = (torch.sigmoid(outputs) >= 0.5).to(targets.dtype)
+                correct += int((pred == targets).sum().item())
+                total += int(targets.numel())
+            else:
+                labels = by[:, 0].long() if by.ndim > 1 else by.long()
+                logits = logits_for_single_task(outputs)
+                loss = torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
+                pred = torch.argmax(logits, dim=1)
+                correct += int((pred == labels).sum().item())
+                total += int(labels.numel())
             loss_sum += float(loss.item())
     model.train()
     if total == 0:
@@ -539,6 +558,26 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
             apply_emnist_orientation_fix=not args.no_femnist_orientation_fix,
         )
         return "femnist", "writers", data
+    if scenario == "celeba":
+        train_datasets, val_datasets, test_datasets = make_celeba(
+            num_clients=args.celeba_clients,
+            root=args.celeba_root,
+            download=not args.no_auto_prepare_celeba,
+            iid=not args.celeba_noniid,
+            num_tasks=args.celeba_tasks,
+            seed=args.seed,
+        )
+        data = VisionFederatedData(
+            client_train_datasets=train_datasets,
+            client_test_datasets=test_datasets,
+            global_test_dataset=ConcatDataset(val_datasets),
+            num_classes=args.celeba_tasks,
+            input_channels=3,
+            dataset_note="torchvision_celeba_attr_noniid" if args.celeba_noniid else "torchvision_celeba_attr_iid",
+            num_tasks=args.celeba_tasks,
+            task_type="binary_multitask",
+        )
+        return "celeba", "noniid" if args.celeba_noniid else "iid", data
     if scenario.startswith("cifar10_alpha"):
         alpha = float(scenario.replace("cifar10_alpha", ""))
         data = make_cifar10_dirichlet(
@@ -567,8 +606,8 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         method=method,
         model=model,
         client_datasets=data.client_train_datasets,
-        objective_fn=multi_task_classification,
-        m=1,
+        objective_fn=objective_for_data(data),
+        m=data.num_tasks,
         seed=args.seed,
         device=device,
         num_rounds=args.num_rounds,
@@ -655,11 +694,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-samples-per-client", type=int, default=20)
     parser.add_argument("--femnist-clients", type=int, default=50)
     parser.add_argument("--cifar-clients", type=int, default=50)
+    parser.add_argument("--celeba-clients", type=int, default=50)
+    parser.add_argument("--celeba-tasks", type=int, default=4)
     parser.add_argument("--max-cifar-train-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-writer", type=int, default=None)
     parser.add_argument("--torchvision-root", default="data/torchvision")
     parser.add_argument("--femnist-leaf-root", default="data/femnist")
+    parser.add_argument("--celeba-root", default="data/celeba")
     parser.add_argument("--no-auto-prepare-femnist", action="store_true")
+    parser.add_argument("--no-auto-prepare-celeba", action="store_true")
+    parser.add_argument("--celeba-noniid", action="store_true")
     parser.add_argument("--no-femnist-orientation-fix", action="store_true")
     parser.add_argument("--femnist-use-client-test-union-global", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
@@ -677,7 +721,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    args.torchvision_root = str(resolve_project_path(args.torchvision_root))
+    args.femnist_leaf_root = str(resolve_project_path(args.femnist_leaf_root))
+    args.celeba_root = str(resolve_project_path(args.celeba_root))
+    output_dir = resolve_project_path(args.output_dir)
     rows = []
     for scenario in args.scenarios:
         for method in args.methods:

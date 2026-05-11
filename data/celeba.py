@@ -1,28 +1,96 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import logging
 import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
-from PIL import Image
+
+from fedjd.paths import resolve_project_path
 
 logger = logging.getLogger(__name__)
 
 
+def _ensure_optional_dependency(import_name: str, package_name: str) -> None:
+    if importlib.util.find_spec(import_name) is not None:
+        return
+    logger.warning("Missing optional dependency '%s'; attempting to install package '%s'.", import_name, package_name)
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", package_name], check=True)
+    except Exception as exc:
+        raise ImportError(
+            f"CelebA experiments require '{package_name}'. Automatic installation failed; "
+            f"install it manually with: {sys.executable} -m pip install {package_name}"
+        ) from exc
+    if importlib.util.find_spec(import_name) is None:
+        raise ImportError(f"Installed '{package_name}', but Python still cannot import '{import_name}'.")
+
+
+def _import_celeba_transforms():
+    _ensure_optional_dependency("torchvision", "torchvision")
+    from torchvision import transforms
+    return transforms
+
+
+def _import_pil_image():
+    _ensure_optional_dependency("PIL", "Pillow")
+    from PIL import Image
+    return Image
+
+
+def _has_celeba_files(root: str) -> bool:
+    root_path = resolve_project_path(root)
+    file_candidates = [
+        root_path / "list_attr_celeba.txt",
+        root_path / "list_attr_celeba.csv",
+        root_path / "celeba" / "list_attr_celeba.txt",
+        root_path / "celeba" / "list_attr_celeba.csv",
+    ]
+    img_candidates = [
+        root_path / "img_align_celeba" / "img_align_celeba",
+        root_path / "img_align_celeba",
+        root_path / "img_celeba",
+        root_path / "celeba" / "img_align_celeba" / "img_align_celeba",
+        root_path / "celeba" / "img_align_celeba",
+        root_path / "celeba" / "img_celeba",
+    ]
+    return any(path.is_file() for path in file_candidates) and any(path.is_dir() for path in img_candidates)
+
+
+def _prepare_torchvision_celeba(root: str) -> None:
+    root_path = resolve_project_path(root)
+    if _has_celeba_files(root_path):
+        return
+    _ensure_optional_dependency("torchvision", "torchvision")
+    from torchvision import datasets
+
+    try:
+        datasets.CelebA(root=str(root_path), split="train", target_type="attr", download=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Automatic CelebA download failed. CelebA is hosted behind Google Drive and torchvision downloads "
+            "can fail due to quota or confirmation limits. Manually place list_attr_celeba.txt, "
+            "list_eval_partition.txt, and img_align_celeba under the CelebA root, or pass --no-auto-prepare-celeba."
+        ) from exc
+
+
 class LocalCelebA(Dataset):
     def __init__(self, root: str, split: str, transform=None):
-        self.root = root
+        root_path = resolve_project_path(root)
+        self.root = str(root_path)
         self.split = split
         self.transform = transform
 
-        attr_path = self._find_file(root, ["list_attr_celeba.txt", "list_attr_celeba.csv"])
-        partition_path = self._find_file(root, ["list_eval_partition.txt", "list_eval_partition.csv"])
-        img_dir = self._find_img_dir(root)
+        attr_path = self._find_file(root_path, ["list_attr_celeba.txt", "list_attr_celeba.csv"])
+        partition_path = self._find_file(root_path, ["list_eval_partition.txt", "list_eval_partition.csv"])
+        img_dir = self._find_img_dir(root_path)
 
         self.attr_names, attr_data = self._load_attrs(attr_path)
         partition = self._load_partition(partition_path)
@@ -42,34 +110,36 @@ class LocalCelebA(Dataset):
 
         logger.info(
             "LocalCelebA: split=%s, %d images, %d attributes from %s",
-            split, len(self.filenames), len(self.attr_names), root,
+            split, len(self.filenames), len(self.attr_names), root_path,
         )
 
     @staticmethod
-    def _find_file(root: str, candidates: list[str]) -> str:
+    def _find_file(root: str | Path, candidates: list[str]) -> str:
+        root_path = Path(root)
         for name in candidates:
-            path = os.path.join(root, name)
-            if os.path.isfile(path):
-                return path
-            path = os.path.join(root, "celeba", name)
-            if os.path.isfile(path):
-                return path
+            path = root_path / name
+            if path.is_file():
+                return str(path)
+            path = root_path / "celeba" / name
+            if path.is_file():
+                return str(path)
         raise FileNotFoundError(
             f"Cannot find any of {candidates} under {root} or {root}/celeba"
         )
 
     @staticmethod
-    def _find_img_dir(root: str) -> str:
+    def _find_img_dir(root: str | Path) -> str:
+        root_path = Path(root)
         for d in [
-            os.path.join(root, "img_align_celeba", "img_align_celeba"),
-            os.path.join(root, "img_align_celeba"),
-            os.path.join(root, "img_celeba"),
-            os.path.join(root, "celeba", "img_align_celeba", "img_align_celeba"),
-            os.path.join(root, "celeba", "img_align_celeba"),
-            os.path.join(root, "celeba", "img_celeba"),
+            root_path / "img_align_celeba" / "img_align_celeba",
+            root_path / "img_align_celeba",
+            root_path / "img_celeba",
+            root_path / "celeba" / "img_align_celeba" / "img_align_celeba",
+            root_path / "celeba" / "img_align_celeba",
+            root_path / "celeba" / "img_celeba",
         ]:
-            if os.path.isdir(d):
-                return d
+            if d.is_dir():
+                return str(d)
         raise FileNotFoundError(
             f"Cannot find image directory under {root}"
         )
@@ -142,6 +212,7 @@ class LocalCelebA(Dataset):
 
     def __getitem__(self, idx):
         img_path = os.path.join(self.img_dir, self.filenames[idx])
+        Image = _import_pil_image()
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
@@ -160,7 +231,10 @@ def make_celeba(
 ) -> Tuple[List[Dataset], List[Dataset], List[Dataset]]:
     if seed is not None:
         torch.manual_seed(seed)
+    if download:
+        _prepare_torchvision_celeba(root)
 
+    transforms = _import_celeba_transforms()
     transform = transforms.Compose([
         transforms.Resize((64, 64)),
         transforms.ToTensor(),

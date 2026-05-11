@@ -7,10 +7,12 @@ import numpy as np
 import torch
 from torch.utils.data import TensorDataset
 
+from fedjd.paths import data_path, resolve_project_path
+
 logger = logging.getLogger(__name__)
 
 RIVER_FLOW_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00444/river_flow.zip"
-RIVER_FLOW_DIR = Path("data/river_flow")
+RIVER_FLOW_DIR = data_path("river_flow")
 
 
 def _download_river_flow(data_dir: Path):
@@ -56,12 +58,14 @@ def make_river_flow(
     seed: int = 7,
     num_tasks: int = 8,
     download: bool = True,
+    root: str | Path | None = None,
 ) -> dict:
     torch.manual_seed(seed)
 
-    data_path = RIVER_FLOW_DIR / "river_flow.csv"
+    river_flow_dir = resolve_project_path(root) if root is not None else RIVER_FLOW_DIR
+    data_path = river_flow_dir / "river_flow.csv"
     if not data_path.exists():
-        alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
+        alt_paths = list(river_flow_dir.glob("**/*.csv"))
         if alt_paths:
             rf1_candidates = [p for p in alt_paths if "rf1" in p.name.lower()]
             if rf1_candidates:
@@ -71,8 +75,8 @@ def make_river_flow(
                 data_path = alt_paths[0]
                 logger.info("Using alternative CSV: %s", data_path)
         elif download:
-            _download_river_flow(RIVER_FLOW_DIR)
-            alt_paths = list(RIVER_FLOW_DIR.glob("**/*.csv"))
+            _download_river_flow(river_flow_dir)
+            alt_paths = list(river_flow_dir.glob("**/*.csv"))
             if alt_paths:
                 rf1_candidates = [p for p in alt_paths if "rf1" in p.name.lower()]
                 if rf1_candidates:
@@ -81,7 +85,7 @@ def make_river_flow(
                     data_path = alt_paths[0]
             else:
                 raise FileNotFoundError(
-                    f"River Flow CSV not found after download in {RIVER_FLOW_DIR}. "
+                    f"River Flow CSV not found after download in {river_flow_dir}. "
                     "Please manually download RF1 from "
                     "https://www.kaggle.com/datasets/samanemami/river-flowrf1 "
                     "and place the CSV file at data/river_flow/RF1.csv. "
