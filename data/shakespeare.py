@@ -270,7 +270,9 @@ def _encode_user_dataset(
         encoded_y.append([vocab.get(target_char, unk), client_id])
     inputs = torch.tensor(encoded_x, dtype=torch.long)
     targets = torch.tensor(encoded_y, dtype=torch.long)
-    return TensorDataset(inputs, targets)
+    dataset = TensorDataset(inputs, targets)
+    dataset.objective_indices = [client_id]
+    return dataset
 
 
 def make_shakespeare(

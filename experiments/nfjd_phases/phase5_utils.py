@@ -330,6 +330,7 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                 device=device,
                 learning_rate=learning_rate,
                 local_epochs=local_epochs,
+                objective_indices=getattr(client_datasets[i], "objective_indices", None),
             )
             for i in range(num_clients)
         ]

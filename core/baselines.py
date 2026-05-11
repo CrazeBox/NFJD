@@ -16,6 +16,15 @@ from .evaluation import evaluate_objectives_on_dataset
 from .server import FedJDServer, RoundStats, _count_nan_inf, assign_flat_parameters, flatten_parameters
 
 
+def _mean_active_losses(losses: list[torch.Tensor]) -> torch.Tensor:
+    if not losses:
+        raise ValueError("At least one loss is required.")
+    active = [loss for loss in losses if bool(torch.any(loss.detach() != 0))]
+    if not active:
+        active = losses
+    return sum(active) / len(active)
+
+
 def _evaluate_global_objectives(model, clients, objective_fn, device):
     total_examples = sum(c.num_examples for c in clients)
     running = None
@@ -442,7 +451,7 @@ class FedLocalTrainClient:
                 batch_targets = batch_targets.to(self.device)
                 predictions = model(batch_inputs)
                 losses = objective_fn(predictions, batch_targets, batch_inputs)
-                loss = sum(losses) / max(len(losses), 1)
+                loss = _mean_active_losses(losses)
                 batch_size = int(batch_inputs.shape[0])
                 total_loss += float(loss.item()) * batch_size
                 total_examples += batch_size
@@ -462,7 +471,7 @@ class FedLocalTrainClient:
                 model.zero_grad(set_to_none=True)
                 predictions = model(batch_inputs)
                 losses = objective_fn(predictions, batch_targets, batch_inputs)
-                total_loss = sum(losses) / max(len(losses), 1)
+                total_loss = _mean_active_losses(losses)
                 total_loss.backward()
                 grads = flatten_gradients(model.parameters())
                 next_flat = flatten_parameters(model.parameters()) - self.learning_rate * grads
