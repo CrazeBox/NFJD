@@ -138,7 +138,9 @@ def run_one(args: argparse.Namespace, method: str, output_dir: Path) -> dict:
         sequence_length=args.sequence_length,
         stride=args.sequence_stride,
         source=args.shakespeare_source,
-        select_top_clients=not args.random_clients,
+        client_selection="random" if args.random_clients else args.client_selection,
+        sample_fraction=args.sample_fraction,
+        vocab_scope=args.vocab_scope,
     )
     device = torch.device(args.device)
     model = CharLSTM(
@@ -225,10 +227,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--client-test-fraction", type=float, default=0.2)
     parser.add_argument("--min-samples-per-client", type=int, default=64)
-    parser.add_argument("--max-samples-per-client", type=int, default=2000)
+    parser.add_argument("--max-samples-per-client", type=int, default=2000, help="Use <=0 to keep all generated samples per client.")
     parser.add_argument("--sequence-length", type=int, default=80)
-    parser.add_argument("--sequence-stride", type=int, default=5)
+    parser.add_argument("--sequence-stride", type=int, default=1)
     parser.add_argument("--shakespeare-source", choices=["auto", "custom", "leaf"], default="auto")
+    parser.add_argument("--client-selection", choices=["top", "random", "leaf"], default="leaf")
+    parser.add_argument("--sample-fraction", type=float, default=1.0)
+    parser.add_argument("--vocab-scope", choices=["all", "sampled", "selected"], default="all")
     parser.add_argument("--random-clients", action="store_true")
     parser.add_argument("--embedding-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=128)

@@ -11,18 +11,25 @@ By default, the experiment resolves `data/shakespeare` relative to the repositor
 Custom construction:
 
 1. Read `raw_data.txt` from `data/shakespeare/data/raw_data/raw_data.txt`, or the same layout under the path passed with `--shakespeare-root`.
-2. Parse uppercase speaker headings and collect each speaker's dialogue.
-3. Generate next-character samples with a sliding window.
-4. Select the clients with the most samples by default.
-5. Split each selected client into local train/test samples.
+2. Parse plays and character lines with the same indentation-based regular expressions used by LEAF's Shakespeare preprocessor, including the `THE COMEDY OF ERRORS` special case.
+3. Use LEAF's `play_character` user key convention so same-named speakers in different plays are not merged.
+4. Generate next-character samples from each user's text with LEAF's default 80-character context and stride 1.
+5. Apply LEAF-style non-IID sampling with `--sample-fraction`; `1.0` keeps the full raw user pool.
+6. Remove users below `--min-samples-per-client`.
+7. Split each selected client by sample with the FedAvg Shakespeare convention: 80% train and 20% test by default. For Shakespeare, the test segment starts after a `sequence_length - 1` gap to avoid overlapping train/test windows, matching LEAF's `split_data.py` behavior.
 
 The important controls are:
 
 ```text
 --shakespeare-source custom    Use our raw-text construction directly.
 --sequence-length 80           Input context length.
---sequence-stride 5            Sliding-window stride; smaller values create more samples.
+--sequence-stride 1            Sliding-window stride; 1 matches LEAF's next-character construction.
 --min-samples-per-client 100   Minimum generated samples required before train/test split.
+--client-test-fraction 0.2     Per-client held-out test fraction; 0.2 gives 80/20 train/test.
+--max-samples-per-client 0     Keep all generated samples instead of capping each client.
+--sample-fraction 1.0          LEAF-style non-IID sample fraction over users/samples.
+--client-selection leaf        Choose top, random, or LEAF sampled order from eligible clients.
+--vocab-scope all              Build character vocabulary from all parsed users, not only selected clients.
 --random-clients               Randomly select eligible clients instead of using the largest clients.
 ```
 
@@ -40,6 +47,8 @@ python fedjd/experiments/nfjd_phases/run_shakespeare_client_objectives.py \
   --sequence-length 80 \
   --sequence-stride 5 \
   --min-samples-per-client 100 \
+  --client-selection leaf \
+  --vocab-scope all \
   --shakespeare-root data/shakespeare \
   --output-dir results/shakespeare_client_objectives
 ```
@@ -53,7 +62,7 @@ Use this if automatic setup fails because the server cannot access GitHub or doe
 ```bash
 git clone https://github.com/TalwalkarLab/leaf.git
 cd leaf/data/shakespeare
-bash preprocess.sh -s niid --sf 1.0 -k 0 -t sample
+bash preprocess.sh -s niid --sf 1.0 -k 0 -t sample -tf 0.8
 ```
 
 2. Copy the generated Shakespeare directory to the server, or copy the JSON files into the project data directory.
@@ -108,6 +117,8 @@ python fedjd/experiments/nfjd_phases/run_shakespeare_client_objectives.py \
   --shakespeare-source custom \
   --sequence-stride 5 \
   --min-samples-per-client 100 \
+  --client-selection leaf \
+  --vocab-scope all \
   --shakespeare-root data/shakespeare \
   --no-auto-prepare-shakespeare \
   --output-dir results/shakespeare_client_objectives

@@ -18,11 +18,19 @@ from fedjd.paths import data_path, resolve_project_path
 logger = logging.getLogger(__name__)
 
 SHAKESPEARE_DIR = data_path("shakespeare")
+_LEAF_CHARACTER_RE = re.compile(r"^  ([a-zA-Z][a-zA-Z ]*)\. (.*)")
+_LEAF_CONT_RE = re.compile(r"^    (.*)")
+_LEAF_COE_CHARACTER_RE = re.compile(r"^([a-zA-Z][a-zA-Z ]*)\. (.*)")
+_LEAF_COE_CONT_RE = re.compile(r"^(.*)")
 _SPEAKER_RE = re.compile(r"^[A-Z][A-Z .'-]{1,48}\.?$")
+_PLAY_TITLE_RE = re.compile(r"^(THE )?(TRAGEDY|COMEDY|HISTORY|LIFE|FIRST PART|SECOND PART|THIRD PART|MERRY|TAMING|TEMPEST|WINTER|TWO|TWELFTH|MERCHANT|MUCH ADO|MEASURE|ALL'S WELL|AS YOU LIKE|LOVE'S LABOUR|MIDSUMMER|OTHELLO|HAMLET|MACBETH|KING|RICHARD|HENRY|ROMEO|JULIUS|ANTONY|CORIOLANUS|CYMBELINE|PERICLES|TIMON|TITUS|TROILUS).*")
 _NON_SPEAKER_HEADINGS = {
     "ACT", "SCENE", "THE END", "DRAMATIS PERSONAE", "THE SONNETS", "A LOVER'S COMPLAINT",
     "VENUS AND ADONIS", "THE RAPE OF LUCRECE", "THE PASSIONATE PILGRIM",
 }
+_NON_DIALOGUE_MARKERS = (
+    "PROJECT GUTENBERG", "START OF THE PROJECT", "END OF THE PROJECT", "CONTENTS", "THE COMPLETE WORKS",
+)
 
 
 @dataclass
@@ -81,7 +89,7 @@ def _prepare_leaf_shakespeare(root: Path) -> Path:
 
     try:
         subprocess.run(
-            [bash_path, str(preprocess.name), "-s", "niid", "--sf", "1.0", "-k", "0", "-t", "sample"],
+            [bash_path, str(preprocess.name), "-s", "niid", "--sf", "1.0", "-k", "0", "-t", "sample", "-tf", "0.8"],
             cwd=str(shakespeare_dir),
             check=True,
         )
@@ -124,14 +132,132 @@ def _is_speaker_line(line: str) -> bool:
     return bool(_SPEAKER_RE.match(text)) and any(char.isalpha() for char in stripped)
 
 
-def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
-    raw_path = next((path for path in _raw_text_candidates(root) if path.is_file()), None)
-    if raw_path is None:
-        return {}
+def _normalize_key(text: str) -> str:
+    text = text.strip().rstrip(".")
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    return text.strip("_") or "UNKNOWN"
 
-    logger.warning("Building custom Shakespeare speaker clients from raw text: %s", raw_path)
-    text = raw_path.read_text(encoding="utf-8", errors="replace")
+
+def _is_play_title(line: str) -> bool:
+    text = line.strip().rstrip(".")
+    if not text or len(text) > 90:
+        return False
+    if any(marker in text for marker in _NON_DIALOGUE_MARKERS):
+        return False
+    if any(char.isdigit() for char in text):
+        return False
+    if text in _NON_SPEAKER_HEADINGS:
+        return False
+    if text.startswith(("ACT ", "SCENE ", "Enter ", "Exit ", "Exeunt ")):
+        return False
+    return text.isupper() and bool(_PLAY_TITLE_RE.match(text))
+
+
+def _make_examples(text: str, sequence_length: int, stride: int) -> tuple[list[str], list[str]]:
+    normalized = text.replace("\n", " ")
+    normalized = re.sub(r"   *", " ", normalized).strip()
+    xs: list[str] = []
+    ys: list[str] = []
+    if len(normalized) <= sequence_length:
+        return xs, ys
+    for start in range(0, len(normalized) - sequence_length, max(stride, 1)):
+        xs.append(normalized[start:start + sequence_length])
+        ys.append(normalized[start + sequence_length])
+    return xs, ys
+
+
+def _remove_nonalphanumerics(text: str) -> str:
+    return re.sub(r"\W+", "_", text)
+
+
+def _leaf_play_and_character(play: str, character: str) -> str:
+    return _remove_nonalphanumerics((play + "_" + character).replace(" ", "_"))
+
+
+def _leaf_match_character(line: str, comedy_of_errors: bool):
+    return (_LEAF_COE_CHARACTER_RE if comedy_of_errors else _LEAF_CHARACTER_RE).match(line)
+
+
+def _leaf_match_continuation(line: str, comedy_of_errors: bool):
+    return (_LEAF_COE_CONT_RE if comedy_of_errors else _LEAF_CONT_RE).match(line)
+
+
+def _split_into_plays_leaf_style(shakespeare_full: str) -> list[tuple[str, dict[str, list[str]]]]:
+    plays: list[tuple[str, dict[str, list[str]]]] = []
+    slines = shakespeare_full.splitlines(True)[1:]
+
+    author_count = 0
+    start_i = 0
+    for i, line in enumerate(slines):
+        if "by William Shakespeare" in line:
+            author_count += 1
+        if author_count == 2:
+            start_i = max(i - 5, 0)
+            break
+    slines = slines[start_i:]
+
+    current_character = None
+    characters: dict[str, list[str]] | None = None
+    comedy_of_errors = False
+    for i, line in enumerate(slines):
+        if i > 124195 - start_i:
+            break
+        if "by William Shakespeare" in line:
+            current_character = None
+            characters = {}
+            title = ""
+            for back in range(2, 8):
+                if i - back >= 0 and slines[i - back].strip():
+                    title = slines[i - back].strip()
+                    break
+            if not title:
+                continue
+            comedy_of_errors = title == "THE COMEDY OF ERRORS"
+            plays.append((title, characters))
+            continue
+
+        if characters is None:
+            continue
+
+        match = _leaf_match_character(line, comedy_of_errors)
+        if match:
+            character, snippet = match.group(1).upper(), match.group(2)
+            if not (comedy_of_errors and character.startswith("ACT ")):
+                characters.setdefault(character, []).append(snippet)
+                current_character = character
+                continue
+            current_character = None
+            continue
+
+        if current_character:
+            match = _leaf_match_continuation(line, comedy_of_errors)
+            if match:
+                if comedy_of_errors and match.group(1).startswith("<"):
+                    current_character = None
+                    continue
+                characters[current_character].append(match.group(1))
+                continue
+
+    return [(play, chars) for play, chars in plays if len(chars) > 1]
+
+
+def _build_leaf_style_users_from_text(text: str, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
+    users: dict[str, tuple[list[str], list[str]]] = {}
+    plays = _split_into_plays_leaf_style(text)
+    for play, characters in plays:
+        for character, sound_bites in characters.items():
+            if len(sound_bites) <= 2:
+                continue
+            user = _leaf_play_and_character(play, character)
+            xs, ys = _make_examples("\n".join(sound_bites), sequence_length, stride)
+            if xs:
+                users[user] = (xs, ys)
+    return users
+
+
+def _build_heading_style_users_from_text(text: str, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
     speaker_chunks: dict[str, list[str]] = {}
+    current_play = "UNKNOWN_PLAY"
     current_speaker: str | None = None
     current_lines: list[str] = []
 
@@ -149,11 +275,18 @@ def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[
         stripped = line.strip()
         if not stripped:
             continue
+        if any(marker in stripped.upper() for marker in _NON_DIALOGUE_MARKERS):
+            continue
         if stripped.startswith(("[", "(")) and stripped.endswith(("]", ")")):
+            continue
+        if _is_play_title(stripped):
+            flush_current()
+            current_play = _normalize_key(stripped)
+            current_speaker = None
             continue
         if _is_speaker_line(stripped):
             flush_current()
-            current_speaker = stripped.rstrip(".").replace(" ", "_")
+            current_speaker = f"{current_play}::{_normalize_key(stripped)}"
             continue
         if current_speaker is not None:
             current_lines.append(stripped)
@@ -161,19 +294,27 @@ def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[
 
     users: dict[str, tuple[list[str], list[str]]] = {}
     for speaker, chunks in speaker_chunks.items():
-        speaker_text = " ".join(chunks)
-        speaker_text = re.sub(r"\s+", " ", speaker_text).strip()
-        if len(speaker_text) <= sequence_length:
-            continue
-        xs = []
-        ys = []
-        for start in range(0, len(speaker_text) - sequence_length, max(stride, 1)):
-            xs.append(speaker_text[start:start + sequence_length])
-            ys.append(speaker_text[start + sequence_length])
+        xs, ys = _make_examples(" ".join(chunks), sequence_length, stride)
         if xs:
             users[speaker] = (xs, ys)
-    logger.warning("Built %d custom Shakespeare speaker clients from raw text.", len(users))
+    logger.warning("Built %d heading-based Shakespeare clients from raw text.", len(users))
     return users
+
+
+def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
+    raw_path = next((path for path in _raw_text_candidates(root) if path.is_file()), None)
+    if raw_path is None:
+        return {}
+
+    logger.warning("Building LEAF-style Shakespeare clients from raw text: %s", raw_path)
+    text = raw_path.read_text(encoding="utf-8", errors="replace")
+    users = _build_leaf_style_users_from_text(text, sequence_length, stride)
+    if users:
+        logger.warning("Built %d LEAF-style play-character clients from raw text.", len(users))
+        return users
+
+    logger.warning("LEAF-style parser produced no clients; falling back to heading-based parser.")
+    return _build_heading_style_users_from_text(text, sequence_length, stride)
 
 
 def _load_leaf_users(root: Path, auto_prepare: bool) -> dict[str, tuple[list[str], list[str]]]:
@@ -234,7 +375,53 @@ def _load_shakespeare_users(
             "Could not build Shakespeare clients. Provide LEAF JSON files or raw_data.txt under "
             f"{root}/data/raw_data/raw_data.txt."
         )
-    return users, "custom_raw_speaker_stride"
+    return users, "custom_raw_leafstyle_stride"
+
+
+def _leaf_niid_sample_users(
+    users: dict[str, tuple[list[str], list[str]]],
+    fraction: float,
+    seed: int,
+) -> dict[str, tuple[list[str], list[str]]]:
+    ordered_users = list(users.keys())
+    rng = random.Random(seed)
+    rng.shuffle(ordered_users)
+    if fraction >= 1.0:
+        return {user: users[user] for user in ordered_users}
+    target_samples = int(max(fraction, 0.0) * sum(len(users[user][1]) for user in ordered_users))
+    sampled: dict[str, tuple[list[str], list[str]]] = {}
+    total = 0
+    for user in ordered_users:
+        xs, ys = users[user]
+        remaining = target_samples - total
+        if remaining <= 0:
+            break
+        if len(ys) > remaining:
+            # Match LEAF's niid sampling behavior: the final selected user may
+            # contribute only the first remaining samples.
+            sampled[user] = (xs[:remaining], ys[:remaining])
+            total += remaining
+        else:
+            sampled[user] = (xs, ys)
+            total += len(ys)
+        if total >= target_samples:
+            break
+    return sampled
+
+
+def _leaf_sample_split_indices(total_samples: int, train_fraction: float, sequence_length: int) -> tuple[list[int], list[int]]:
+    if total_samples < 2:
+        return [], []
+    num_train = max(1, int(train_fraction * total_samples))
+    if total_samples == 2:
+        num_train = 1
+    num_train = min(num_train, total_samples - 1)
+    train_indices = list(range(num_train))
+    test_start = num_train + sequence_length - 1
+    test_indices = list(range(test_start, total_samples))
+    if not test_indices:
+        test_indices = list(range(num_train, total_samples))
+    return train_indices, test_indices
 
 
 def _build_vocab(users: dict[str, tuple[list[str], list[str]]]) -> dict[str, int]:
@@ -284,12 +471,17 @@ def make_shakespeare(
     max_samples_per_client: int | None = 2000,
     test_fraction: float = 0.2,
     sequence_length: int = 80,
-    stride: int = 5,
+    stride: int = 1,
     source: str = "auto",
     select_top_clients: bool = True,
+    client_selection: str = "leaf",
+    sample_fraction: float = 1.0,
+    vocab_scope: str = "all",
 ) -> ShakespeareFederatedData:
     rng = random.Random(seed)
     root_path = resolve_project_path(root) if root is not None else SHAKESPEARE_DIR
+    if max_samples_per_client is not None and max_samples_per_client <= 0:
+        max_samples_per_client = None
     users, source_note = _load_shakespeare_users(
         root_path,
         auto_prepare=auto_prepare,
@@ -297,40 +489,51 @@ def make_shakespeare(
         stride=stride,
         source=source,
     )
-    eligible = [user for user, (xs, ys) in users.items() if len(xs) >= min_samples_per_client and len(xs) == len(ys)]
+    sampled_user_data = _leaf_niid_sample_users(users, sample_fraction, seed)
+    eligible = []
+    for user, (xs, ys) in sampled_user_data.items():
+        if len(xs) < min_samples_per_client or len(xs) != len(ys):
+            continue
+        cap_len = min(len(xs), max_samples_per_client) if max_samples_per_client is not None else len(xs)
+        train_idx, test_idx = _leaf_sample_split_indices(cap_len, 1.0 - test_fraction, sequence_length)
+        if train_idx and test_idx:
+            eligible.append(user)
     if len(eligible) < num_clients:
-        largest = sorted((len(users[user][0]), user) for user in users)[-10:]
+        largest = sorted((len(sampled_user_data[user][0]), user) for user in sampled_user_data)[-10:]
         raise RuntimeError(
             f"Shakespeare has only {len(eligible)} eligible clients with at least {min_samples_per_client} samples, "
             f"fewer than requested num_clients={num_clients}. Largest clients: {largest}"
         )
-    if select_top_clients:
-        selected = sorted(eligible, key=lambda user: len(users[user][0]), reverse=True)[:num_clients]
-    else:
+    if client_selection not in {"top", "random", "leaf"}:
+        raise ValueError("client_selection must be one of: top, random, leaf")
+    if not select_top_clients and client_selection == "top":
+        client_selection = "random"
+    if client_selection == "top":
+        selected = sorted(eligible, key=lambda user: len(sampled_user_data[user][0]), reverse=True)[:num_clients]
+    elif client_selection == "random":
         rng.shuffle(eligible)
         selected = eligible[:num_clients]
-    rng.shuffle(selected)
-    selected_users = {user: users[user] for user in selected}
-    vocab = _build_vocab(selected_users)
+    else:
+        selected = eligible[:num_clients]
+    if vocab_scope not in {"all", "sampled", "selected"}:
+        raise ValueError("vocab_scope must be one of: all, sampled, selected")
+    if vocab_scope == "all":
+        vocab = _build_vocab(users)
+    elif vocab_scope == "sampled":
+        vocab = _build_vocab(sampled_user_data)
+    else:
+        vocab = _build_vocab({user: sampled_user_data[user] for user in selected})
 
     train_datasets: list[Dataset] = []
     test_datasets: list[Dataset] = []
     train_sizes: list[int] = []
     test_sizes: list[int] = []
     for client_id, user in enumerate(selected):
-        xs, ys = users[user]
-        indices = list(range(len(xs)))
-        rng_client = random.Random(seed * 1009 + client_id)
-        rng_client.shuffle(indices)
-        if max_samples_per_client is not None and len(indices) > max_samples_per_client:
-            indices = indices[:max_samples_per_client]
-        if len(indices) <= 1:
-            train_idx = test_idx = indices
-        else:
-            test_count = max(1, int(round(len(indices) * test_fraction)))
-            test_count = min(test_count, len(indices) - 1)
-            test_idx = indices[:test_count]
-            train_idx = indices[test_count:]
+        xs, ys = sampled_user_data[user]
+        total_count = len(xs)
+        if max_samples_per_client is not None and total_count > max_samples_per_client:
+            total_count = max_samples_per_client
+        train_idx, test_idx = _leaf_sample_split_indices(total_count, 1.0 - test_fraction, sequence_length)
 
         train_datasets.append(
             _encode_user_dataset([xs[i] for i in train_idx], [ys[i] for i in train_idx], vocab, client_id, sequence_length)
