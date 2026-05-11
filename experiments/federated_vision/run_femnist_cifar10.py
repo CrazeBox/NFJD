@@ -24,7 +24,7 @@ from fedjd.data.federated_vision import (  # noqa: E402
     make_femnist_writers,
 )
 from fedjd.experiments.nfjd_phases.phase5_utils import build_trainer  # noqa: E402
-from fedjd.models.cifar_resnet import CIFARResNet18MTL  # noqa: E402
+from fedjd.models.basic_cnn_mtl import BasicCNNMTL  # noqa: E402
 from fedjd.models.femnist_cnn import FEMNISTCNN  # noqa: E402
 from fedjd.problems.classification import multi_task_classification  # noqa: E402
 
@@ -63,7 +63,7 @@ def build_model(dataset: str, num_classes: int):
     if dataset == "femnist":
         return FEMNISTCNN(num_tasks=1, num_classes=num_classes), "femnist_small_cnn"
     if dataset == "cifar10":
-        return CIFARResNet18MTL(num_tasks=1, num_classes=num_classes), "cifar_resnet18_3x3_groupnorm"
+        return BasicCNNMTL(input_channels=3, num_tasks=1, num_classes=num_classes), "cifar_basic_cnn"
     raise ValueError(f"Unsupported dataset: {dataset}")
 
 
@@ -363,6 +363,167 @@ def plot_curves(output_dir: Path, exp_id: str, curve_rows: list[dict]) -> None:
     plt.close(fig)
 
 
+def _safe_plot_name(value: object) -> str:
+    text = str(value)
+    safe = []
+    for char in text:
+        if char.isalnum() or char in {"-", "_"}:
+            safe.append(char)
+        elif char == ".":
+            safe.append("p")
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_") or "plot"
+
+
+def _row_float(row: dict, key: str) -> float:
+    value = row.get(key, math.nan)
+    if value in {None, ""}:
+        return math.nan
+    return float(value)
+
+
+def plot_method_pareto(output_dir: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        LOGGER.warning("matplotlib is unavailable; skipping method-level Pareto plots")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grouped: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (row.get("dataset"), row.get("split"), row.get("seed"), row.get("num_rounds"), row.get("local_epochs"), row.get("participation_rate"))
+        grouped.setdefault(key, []).append(row)
+
+    for (dataset, split, seed, rounds, local_epochs, participation), group_rows in grouped.items():
+        valid_rows = [
+            row for row in group_rows
+            if not math.isnan(_row_float(row, "mean_client_test_accuracy"))
+            and not math.isnan(_row_float(row, "worst10_client_accuracy"))
+        ]
+        if not valid_rows:
+            continue
+
+        means = np.asarray([_row_float(row, "mean_client_test_accuracy") for row in valid_rows], dtype=np.float64)
+        worst10 = np.asarray([_row_float(row, "worst10_client_accuracy") for row in valid_rows], dtype=np.float64)
+        round_times = np.asarray([_row_float(row, "avg_round_time") for row in valid_rows], dtype=np.float64)
+        methods = [str(row.get("method", "method")) for row in valid_rows]
+        points = np.stack([means, worst10], axis=1)
+        mask = pareto_mask(points)
+        group_name = _safe_plot_name(f"{dataset}_{split}_seed{seed}_R{rounds}_E{local_epochs}_pr{participation}")
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        if np.isfinite(round_times).any():
+            scatter = ax.scatter(means, worst10, c=round_times, s=95, cmap="viridis_r", alpha=0.9, edgecolors="black", linewidths=0.8)
+            cbar = fig.colorbar(scatter, ax=ax)
+            cbar.set_label("Avg round time (s)")
+        else:
+            ax.scatter(means, worst10, s=95, alpha=0.9, edgecolors="black", linewidths=0.8)
+        for method, x, y in zip(methods, means, worst10):
+            ax.annotate(method, (x, y), xytext=(5, 5), textcoords="offset points", fontsize=9)
+        ax.set_xlabel("Mean client test accuracy")
+        ax.set_ylabel("Worst-10% client accuracy")
+        ax.set_title(f"Mean vs worst-10%: {dataset} {split}")
+        ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(output_dir / f"method_mean_vs_worst10_{group_name}.png", dpi=180)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(means[~mask], worst10[~mask], s=80, alpha=0.45, label="dominated methods")
+        ax.scatter(means[mask], worst10[mask], s=110, alpha=0.95, label="Pareto methods", edgecolors="black", linewidths=0.8)
+        if mask.any():
+            order = np.argsort(means[mask])
+            pareto_x = means[mask][order]
+            pareto_y = worst10[mask][order]
+            ax.plot(pareto_x, pareto_y, linewidth=1.6, linestyle="--", color="tab:red", label="Pareto front")
+        for method, x, y in zip(methods, means, worst10):
+            ax.annotate(method, (x, y), xytext=(5, 5), textcoords="offset points", fontsize=9)
+        ax.set_xlabel("Mean client test accuracy")
+        ax.set_ylabel("Worst-10% client accuracy")
+        ax.set_title(f"Method-level Pareto front: {dataset} {split}")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / f"method_pareto_mean_worst10_{group_name}.png", dpi=180)
+        plt.close(fig)
+
+        finite_time = np.isfinite(round_times)
+        if finite_time.any():
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
+            axes[0].scatter(round_times[finite_time], means[finite_time], s=95, alpha=0.9, edgecolors="black", linewidths=0.8)
+            axes[1].scatter(round_times[finite_time], worst10[finite_time], s=95, alpha=0.9, edgecolors="black", linewidths=0.8, color="tab:orange")
+            for method, t, mean, worst in zip(methods, round_times, means, worst10):
+                if not math.isfinite(t):
+                    continue
+                axes[0].annotate(method, (t, mean), xytext=(5, 5), textcoords="offset points", fontsize=9)
+                axes[1].annotate(method, (t, worst), xytext=(5, 5), textcoords="offset points", fontsize=9)
+            axes[0].set_xlabel("Avg round time (s)")
+            axes[0].set_ylabel("Mean client test accuracy")
+            axes[0].set_title("Efficiency vs mean accuracy")
+            axes[1].set_xlabel("Avg round time (s)")
+            axes[1].set_ylabel("Worst-10% client accuracy")
+            axes[1].set_title("Efficiency vs tail accuracy")
+            for ax in axes:
+                ax.grid(True, alpha=0.25)
+            fig.suptitle(f"Time/accuracy trade-off: {dataset} {split}")
+            fig.tight_layout()
+            fig.savefig(output_dir / f"method_efficiency_tradeoff_{group_name}.png", dpi=180)
+            plt.close(fig)
+
+
+def plot_sorted_client_accuracy(output_dir: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        LOGGER.warning("matplotlib is unavailable; skipping sorted client accuracy plots")
+        return
+
+    grouped: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (row.get("dataset"), row.get("split"), row.get("seed"), row.get("num_rounds"), row.get("local_epochs"), row.get("participation_rate"))
+        grouped.setdefault(key, []).append(row)
+
+    for (dataset, split, seed, rounds, local_epochs, participation), group_rows in grouped.items():
+        series = []
+        for row in group_rows:
+            exp_id = row.get("exp_id")
+            method = str(row.get("method", "method"))
+            client_path = output_dir / f"clients_{exp_id}.csv"
+            if not exp_id or not client_path.exists():
+                continue
+            with open(client_path, newline="", encoding="utf-8") as f:
+                client_rows = list(csv.DictReader(f))
+            accuracies = sorted(
+                float(client_row["test_accuracy"])
+                for client_row in client_rows
+                if client_row.get("test_accuracy") not in {None, ""}
+            )
+            if accuracies:
+                series.append((method, np.asarray(accuracies, dtype=np.float64)))
+        if not series:
+            continue
+
+        group_name = _safe_plot_name(f"{dataset}_{split}_seed{seed}_R{rounds}_E{local_epochs}_pr{participation}")
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for method, accuracies in series:
+            ranks = np.linspace(0.0, 100.0, num=len(accuracies), endpoint=True)
+            ax.plot(ranks, accuracies, linewidth=1.8, label=method)
+        ax.set_xlabel("Client percentile sorted by accuracy")
+        ax.set_ylabel("Client test accuracy")
+        ax.set_title(f"Sorted client accuracy: {dataset} {split}")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / f"sorted_client_accuracy_{group_name}.png", dpi=180)
+        plt.close(fig)
+
+
 def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
     if scenario == "femnist":
         data = make_femnist_writers(
@@ -450,7 +611,6 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
     )
 
     save_client_rows(output_dir / f"clients_{exp_id}.csv", client_rows)
-    plot_pareto(output_dir, exp_id, client_rows)
     plot_curves(output_dir, exp_id, curve_rows)
 
     row = {
@@ -487,9 +647,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenarios", nargs="+", default=["cifar10_alpha0.1", "cifar10_alpha0.5", "femnist"])
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--num-rounds", type=int, default=100)
-    parser.add_argument("--local-epochs", type=int, default=1)
-    parser.add_argument("--participation-rate", type=float, default=0.2)
+    parser.add_argument("--num-rounds", type=int, default=1000)
+    parser.add_argument("--local-epochs", type=int, default=2)
+    parser.add_argument("--participation-rate", type=float, default=0.5)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--client-test-fraction", type=float, default=0.2)
     parser.add_argument("--min-samples-per-client", type=int, default=20)
@@ -523,6 +683,8 @@ def main() -> None:
         for method in args.methods:
             rows.append(run_one(args, scenario, method, output_dir))
             write_summary(output_dir / "summary.csv", rows)
+            plot_method_pareto(output_dir, rows)
+            plot_sorted_client_accuracy(output_dir, rows)
     LOGGER.info("Wrote summary to %s", output_dir / "summary.csv")
 
 
