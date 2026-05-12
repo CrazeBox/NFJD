@@ -37,8 +37,12 @@ class FedJDTrainer:
         total_start = time.time()
 
         logger.info("Starting FedJD training for %d rounds", self.num_rounds)
-        self.initial_objectives = self.server.evaluate_global_objectives()
-        logger.info("Initial objectives: %s", _fmt_objectives(self.initial_objectives))
+        if getattr(self.server, "evaluate_each_round", True):
+            self.initial_objectives = self.server.evaluate_global_objectives()
+            logger.info("Initial objectives: %s", _fmt_objectives(self.initial_objectives))
+        else:
+            self.initial_objectives = []
+            logger.info("Initial objective evaluation skipped for fast training mode")
 
         for round_idx in range(self.num_rounds):
             stats = self.server.run_round(round_idx)

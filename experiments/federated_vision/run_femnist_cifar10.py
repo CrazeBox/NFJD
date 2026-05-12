@@ -622,9 +622,12 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         qfedavg_mode=args.qfedavg_mode,
         fedmgda_plus_update_scale=args.fedmgda_plus_update_scale,
     )
+    if hasattr(trainer.server, "evaluate_each_round"):
+        trainer.server.evaluate_each_round = args.eval_interval > 0
 
     start = time.time()
     if args.eval_interval > 0:
+        trainer.server.evaluate_each_round = False
         history, curve_rows = fit_with_curve_tracking(
             trainer=trainer,
             exp_id=exp_id,
@@ -707,7 +710,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-femnist-orientation-fix", action="store_true")
     parser.add_argument("--femnist-use-client-test-union-global", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
-    parser.add_argument("--eval-interval", type=int, default=25)
+    parser.add_argument("--eval-interval", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="results/federated_vision")
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)

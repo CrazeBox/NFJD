@@ -60,6 +60,22 @@ def _evaluate_global_objectives(model, clients, objective_fn, device):
     return [float(value.item()) for value in running]
 
 
+def _round_objectives(server) -> list[float]:
+    if not getattr(server, "evaluate_each_round", True):
+        return []
+    return server.evaluate_global_objectives()
+
+
+def _clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().clone() for key, value in model.state_dict().items()}
+
+
+def _reset_local_model(local_model: nn.Module, state_dict: dict[str, torch.Tensor]) -> nn.Module:
+    local_model.load_state_dict(state_dict, strict=True)
+    local_model.zero_grad(set_to_none=True)
+    return local_model
+
+
 @dataclass
 class FMGDAClientResult:
     client_id: int
@@ -322,6 +338,7 @@ class FedMGDAPlusServer(FMGDAServer):
         self.eval_dataset = eval_dataset
         self.aggregator = aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         self.update_scale = float(update_scale)
+        self.evaluate_each_round = True
 
     def run_round(self, round_idx):
         round_start = time.time()
@@ -335,9 +352,15 @@ class FedMGDAPlusServer(FMGDAServer):
         local_steps = 1
         client_rows = []
         client_objectives = []
+        global_state = _clone_state_dict(self.model)
+        local_model = self._clone_model()
 
         for client in sampled:
-            result = client.local_update(self._clone_model(), self.objective_fn)
+            result = client.local_update(
+                _reset_local_model(local_model, global_state),
+                self.objective_fn,
+                compute_initial_loss=True,
+            )
             client_rows.append((-result.delta_theta).to(self.device))
             client_objectives.append(float(result.initial_loss))
             sampled_ids.append(result.client_id)
@@ -373,7 +396,7 @@ class FedMGDAPlusServer(FMGDAServer):
         return RoundStats(
             round_idx=round_idx, sampled_client_ids=sampled_ids,
             num_sampled_clients=len(sampled),
-            objective_values=self.evaluate_global_objectives(),
+            objective_values=_round_objectives(self),
             direction_norm=float(torch.norm(direction, p=2).item()),
             jacobian_norm=float(torch.norm(client_jacobian, p="fro").item()),
             round_time=round_time, upload_bytes=total_upload,
@@ -458,9 +481,14 @@ class FedLocalTrainClient:
         model.train()
         return total_loss / max(total_examples, 1)
 
-    def local_update(self, model: nn.Module, objective_fn: ObjectiveFn) -> LocalTrainClientResult:
+    def local_update(
+        self,
+        model: nn.Module,
+        objective_fn: ObjectiveFn,
+        compute_initial_loss: bool = True,
+    ) -> LocalTrainClientResult:
         start = time.time()
-        initial_loss = self.evaluate_weighted_loss(model, objective_fn)
+        initial_loss = self.evaluate_weighted_loss(model, objective_fn) if compute_initial_loss else 0.0
         theta_init = flatten_parameters(model.parameters()).clone()
         loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -502,6 +530,7 @@ class FedAvgServer:
         self.learning_rate = learning_rate
         self.device = device
         self.eval_dataset = eval_dataset
+        self.evaluate_each_round = True
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -524,11 +553,17 @@ class FedAvgServer:
         max_client_mem = 0.0
         local_steps = 1
         deltas = []
+        global_state = _clone_state_dict(self.model)
+        local_model = self._clone_model()
 
         client_start = time.time()
         total_examples = sum(client.num_examples for client in sampled)
         for client in sampled:
-            result = client.local_update(self._clone_model(), self.objective_fn)
+            result = client.local_update(
+                _reset_local_model(local_model, global_state),
+                self.objective_fn,
+                compute_initial_loss=False,
+            )
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
             total_nan_inf += _count_nan_inf(result.delta_theta)
@@ -561,7 +596,7 @@ class FedAvgServer:
             round_idx=round_idx,
             sampled_client_ids=sampled_ids,
             num_sampled_clients=len(sampled),
-            objective_values=self.evaluate_global_objectives(),
+            objective_values=_round_objectives(self),
             direction_norm=float(torch.norm(aggregate_delta, p=2).item()),
             jacobian_norm=0.0,
             round_time=round_time,
@@ -603,6 +638,7 @@ class FedClientUPGradServer:
         self.aggregator = aggregator or UPGradAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0, solver="auto")
         self.update_scale = float(update_scale)
         self.normalize_client_updates = normalize_client_updates
+        self.evaluate_each_round = True
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -626,10 +662,16 @@ class FedClientUPGradServer:
         local_steps = 1
         client_rows = []
         client_objectives = []
+        global_state = _clone_state_dict(self.model)
+        local_model = self._clone_model()
 
         client_start = time.time()
         for client in sampled:
-            result = client.local_update(self._clone_model(), self.objective_fn)
+            result = client.local_update(
+                _reset_local_model(local_model, global_state),
+                self.objective_fn,
+                compute_initial_loss=False,
+            )
             # A local delta approximates -eta * grad(client_loss); use -delta as the gradient row.
             row = (-result.delta_theta).to(self.device)
             if self.normalize_client_updates:
@@ -637,7 +679,6 @@ class FedClientUPGradServer:
                 if row_norm.item() > 1e-12:
                     row = row / row_norm
             client_rows.append(row)
-            client_objectives.append(float(result.initial_loss))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
             total_nan_inf += _count_nan_inf(result.delta_theta)
@@ -669,7 +710,7 @@ class FedClientUPGradServer:
         return RoundStats(
             round_idx=round_idx, sampled_client_ids=sampled_ids,
             num_sampled_clients=len(sampled),
-            objective_values=self.evaluate_global_objectives(),
+            objective_values=_round_objectives(self),
             direction_norm=float(torch.norm(direction, p=2).item()),
             jacobian_norm=float(torch.norm(client_jacobian, p="fro").item()),
             round_time=round_time, upload_bytes=total_upload,
@@ -707,6 +748,7 @@ class QFedAvgServer:
         if mode not in {"official_delta", "loss_weighted_delta"}:
             raise ValueError(f"Unknown qFedAvg mode: {mode}")
         self.mode = mode
+        self.evaluate_each_round = True
 
     def evaluate_global_objectives(self):
         if self.eval_dataset is not None:
@@ -731,10 +773,16 @@ class QFedAvgServer:
         update_terms = []
         h_values = []
         client_objectives = []
+        global_state = _clone_state_dict(self.model)
+        local_model = self._clone_model()
 
         client_start = time.time()
         for client in sampled:
-            result = client.local_update(self._clone_model(), self.objective_fn)
+            result = client.local_update(
+                _reset_local_model(local_model, global_state),
+                self.objective_fn,
+                compute_initial_loss=True,
+            )
             delta = result.delta_theta.to(self.device)
             loss = max(float(result.initial_loss), self.eps)
             client_objectives.append(loss)
@@ -783,7 +831,7 @@ class QFedAvgServer:
         return RoundStats(
             round_idx=round_idx, sampled_client_ids=sampled_ids,
             num_sampled_clients=len(sampled),
-            objective_values=self.evaluate_global_objectives(),
+            objective_values=_round_objectives(self),
             direction_norm=float(torch.norm(direction, p=2).item()),
             jacobian_norm=0.0,
             round_time=round_time, upload_bytes=total_upload,

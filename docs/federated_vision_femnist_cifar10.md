@@ -44,6 +44,29 @@ Efficiency and convergence metrics:
 2. Average upload bytes.
 3. Single-round aggregation compute overhead, reported as the mean and maximum aggregation/direction-solve time recorded by the server.
 
+## Full-Run Runtime Optimizations
+
+The full FEMNIST+CIFAR10 multi-seed runs use implementation-level optimizations that preserve the reported paper metrics. These changes affect runtime bookkeeping, not the federated optimization objective or final client evaluation protocol.
+
+1. `--eval-interval 0` disables intermediate curve evaluation during training. Final metrics are still computed after training by evaluating the final global model on every client's held-out test split. This preserves `mean_client_test_accuracy`, `worst10_client_accuracy`, `client_accuracy_std`, and `mean_client_test_loss`; it only omits dense convergence curves.
+2. `initial_loss` is skipped only for methods that do not use it in their update rule: `fedavg` and `fedclient_upgrad`. qFedAvg keeps `initial_loss` because q-FFL weighting depends on the pre-update client loss. FedMGDA+ also keeps `initial_loss` for conservative bookkeeping of sampled-client objective values. Therefore the final model updates for qFedAvg and FedMGDA+ are unchanged, and FedAvg/FedClient-UPGrad avoid an unnecessary pre-training forward pass.
+3. Local model materialization reuses a local model object within each communication round. Before every sampled client update, the local model is reset with a strict `load_state_dict` from a cloned snapshot of the server model at the start of the round. This preserves the federated semantics that every sampled client trains from the same broadcast model `theta_t`; clients do not train sequentially from each other's updated models.
+
+The reusable-local-model path is equivalent to repeatedly deep-copying the server model at the algorithm level:
+
+```text
+round t:
+  global_state = clone(theta_t)
+  local_model = reusable model container
+  for each sampled client i:
+    local_model.load_state_dict(global_state, strict=True)
+    client i trains local_model for E local epochs
+    server records delta_i
+  server aggregates all delta_i and updates theta_t -> theta_{t+1}
+```
+
+These optimizations should not be mixed with algorithmic changes such as AMP, larger batch sizes, or different participation rates unless all methods are rerun under the same setting.
+
 ## Output Layout
 
 New results are written under `results/federated_vision/`.
