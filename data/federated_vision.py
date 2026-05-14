@@ -182,6 +182,62 @@ def make_cifar10_dirichlet(
     )
 
 
+def _cifar10_fedmgda_shards(labels: list[int], num_shards: int = 500) -> list[list[int]]:
+    sorted_indices = sorted(range(len(labels)), key=lambda idx: (labels[idx], idx))
+    if len(sorted_indices) % num_shards != 0:
+        raise ValueError(f"CIFAR-10 train size must be divisible by {num_shards} shards.")
+    shard_size = len(sorted_indices) // num_shards
+    return [sorted_indices[start:start + shard_size] for start in range(0, len(sorted_indices), shard_size)]
+
+
+def make_cifar10_fedmgda_paper_shards(
+    seed: int = 7,
+    root: str = "data/torchvision",
+    num_clients: int = 100,
+    num_shards: int = 500,
+    shards_per_client: int = 5,
+) -> VisionFederatedData:
+    if num_clients * shards_per_client != num_shards:
+        raise ValueError(
+            "FedMGDA+ CIFAR-10 paper split requires "
+            f"num_clients * shards_per_client == num_shards, got {num_clients} * {shards_per_client} != {num_shards}."
+        )
+    rng = random.Random(seed)
+    train_set, test_set = _load_cifar10(root)
+    shards = _cifar10_fedmgda_shards([int(label) for label in train_set.targets], num_shards=num_shards)
+    shard_ids = list(range(num_shards))
+    rng.shuffle(shard_ids)
+
+    client_train = []
+    client_test = []
+    for client_id in range(num_clients):
+        assigned = shard_ids[client_id * shards_per_client:(client_id + 1) * shards_per_client]
+        indices = [idx for shard_id in assigned for idx in shards[shard_id]]
+        rng_client = random.Random(seed * 1009 + client_id)
+        rng_client.shuffle(indices)
+
+        total = len(indices)
+        train_count = int(round(total * 0.8))
+        val_count = int(round(total * 0.1))
+        test_count = total - train_count - val_count
+        if train_count <= 0 or val_count <= 0 or test_count <= 0:
+            raise ValueError(f"Invalid per-client CIFAR-10 split size for {total} samples.")
+
+        train_indices = indices[:train_count]
+        test_indices = indices[train_count + val_count:]
+        client_train.append(TargetColumnDataset(train_set, train_indices))
+        client_test.append(TargetColumnDataset(train_set, test_indices))
+
+    return VisionFederatedData(
+        client_train_datasets=client_train,
+        client_test_datasets=client_test,
+        global_test_dataset=TargetColumnDataset(test_set, range(len(test_set))),
+        num_classes=10,
+        input_channels=3,
+        dataset_note="fedmgda_plus_cifar10_500_shards_5_per_user_80_10_10_original_test_global",
+    )
+
+
 def _leaf_json_files(root: Path, split: str | None = None) -> list[Path]:
     if split is None:
         candidates = [root, root / "data" / "train", root / "data" / "test", root / "train", root / "test"]

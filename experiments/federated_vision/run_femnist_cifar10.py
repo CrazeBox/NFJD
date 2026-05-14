@@ -21,12 +21,14 @@ from fedjd.data.federated_vision import (  # noqa: E402
     VisionFederatedData,
     bottom_fraction_mean,
     make_cifar10_dirichlet,
+    make_cifar10_fedmgda_paper_shards,
     make_femnist_writers,
 )
 from fedjd.data.celeba import make_celeba  # noqa: E402
 from fedjd.experiments.nfjd_phases.phase5_utils import build_trainer  # noqa: E402
 from fedjd.models.basic_cnn_mtl import BasicCNNMTL  # noqa: E402
 from fedjd.models.celeba_cnn import CelebaCNN  # noqa: E402
+from fedjd.models.cifar10_cnn import FedMGDAPlusCIFAR10CNN  # noqa: E402
 from fedjd.models.femnist_cnn import FEMNISTCNN, FedMGDAPlusFEMNISTCNN  # noqa: E402
 from fedjd.paths import resolve_project_path  # noqa: E402
 from fedjd.problems.classification import multi_task_binary_classification, multi_task_classification  # noqa: E402
@@ -68,6 +70,8 @@ def build_model(dataset: str, num_classes: int, args: argparse.Namespace):
             return FedMGDAPlusFEMNISTCNN(num_tasks=1, num_classes=num_classes), "fedmgda_plus_table4_femnist_cnn"
         return FEMNISTCNN(num_tasks=1, num_classes=num_classes), "femnist_small_cnn"
     if dataset == "cifar10":
+        if args.cifar_model == "paper_fedmgda_plus":
+            return FedMGDAPlusCIFAR10CNN(num_tasks=1, num_classes=num_classes), "fedmgda_plus_table2_cifar10_cnn"
         return BasicCNNMTL(input_channels=3, num_tasks=1, num_classes=num_classes), "cifar_basic_cnn"
     if dataset == "celeba":
         return CelebaCNN(num_attributes=num_classes), "celeba_cnn"
@@ -596,6 +600,13 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
             min_samples_per_client=args.min_samples_per_client,
         )
         return "cifar10", f"dirichlet_alpha_{alpha}", data
+    if scenario == "cifar10_fedmgda_paper":
+        data = make_cifar10_fedmgda_paper_shards(
+            seed=args.seed,
+            root=args.torchvision_root,
+            num_clients=args.cifar_clients,
+        )
+        return "cifar10", "fedmgda_plus_500shards_5peruser", data
     raise ValueError(f"Unknown scenario: {scenario}")
 
 
@@ -709,6 +720,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--femnist-clients", type=int, default=50)
     parser.add_argument("--femnist-paper-clients-per-round", type=int, default=10)
     parser.add_argument("--cifar-clients", type=int, default=50)
+    parser.add_argument("--cifar-paper-clients-per-round", type=int, default=10)
+    parser.add_argument("--cifar-paper-batch", choices=["small", "full"], default="full")
     parser.add_argument("--celeba-clients", type=int, default=50)
     parser.add_argument("--celeba-tasks", type=int, default=4)
     parser.add_argument("--max-cifar-train-samples", type=int, default=None)
@@ -724,7 +737,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--femnist-use-leaf-train-test-split", action="store_true")
     parser.add_argument("--femnist-leaf-preprocess-kind", choices=["sample", "full"], default="sample")
     parser.add_argument("--femnist-model", choices=["small_cnn", "paper_fedmgda_plus"], default="small_cnn")
+    parser.add_argument("--cifar-model", choices=["basic_cnn", "paper_fedmgda_plus"], default="basic_cnn")
     parser.add_argument("--fedmgda-paper-femnist-preset", action="store_true")
+    parser.add_argument("--fedmgda-paper-cifar10-preset", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--eval-interval", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -764,10 +779,41 @@ def apply_fedmgda_paper_femnist_preset(args: argparse.Namespace) -> None:
     args.fedmgda_plus_normalize_updates = True
 
 
+def apply_fedmgda_paper_cifar10_preset(args: argparse.Namespace) -> None:
+    if not args.fedmgda_paper_cifar10_preset:
+        return
+    args.scenarios = ["cifar10_fedmgda_paper"]
+    args.cifar_model = "paper_fedmgda_plus"
+    args.cifar_clients = 100
+    args.max_cifar_train_samples = None
+    args.min_samples_per_client = 1
+    args.local_epochs = 1
+    args.participation_rate = args.cifar_paper_clients_per_round / max(args.cifar_clients, 1)
+    args.qfedavg_mode = "official_delta"
+    args.fedmgda_plus_normalize_updates = True
+    if args.cifar_paper_batch == "small":
+        args.num_rounds = 2000
+        args.local_batch_size = 10
+        args.learning_rate = 0.01
+        args.qfedavg_q = 0.5
+        args.qfedavg_lipschitz = 1.0
+        args.fedmgda_plus_update_scale = 1.5
+        args.fedmgda_plus_update_decay = 0.1
+    else:
+        args.num_rounds = 3000
+        args.local_batch_size = 400
+        args.learning_rate = 0.1
+        args.qfedavg_q = 0.1
+        args.qfedavg_lipschitz = 0.1
+        args.fedmgda_plus_update_scale = 1.0
+        args.fedmgda_plus_update_decay = 0.025
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     apply_fedmgda_paper_femnist_preset(args)
+    apply_fedmgda_paper_cifar10_preset(args)
     args.torchvision_root = str(resolve_project_path(args.torchvision_root))
     args.femnist_leaf_root = str(resolve_project_path(args.femnist_leaf_root))
     args.celeba_root = str(resolve_project_path(args.celeba_root))
