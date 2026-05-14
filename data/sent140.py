@@ -105,10 +105,19 @@ def _extract_text(sample) -> str:
                 return value
         return " ".join(str(value) for value in sample.values())
     if isinstance(sample, (list, tuple)):
-        # LEAF Sent140 x entries usually contain tweet metadata with text last.
-        for value in reversed(sample):
-            if isinstance(value, str) and value.strip():
-                return value
+        # LEAF Sent140 x entries can include tweet metadata and a split marker
+        # such as "training" after the tweet text. Select the most text-like
+        # string rather than blindly taking the last field.
+        strings = [value.strip() for value in sample if isinstance(value, str) and value.strip()]
+        metadata = {"training", "test", "testing", "no_query", "no query"}
+        candidates = [
+            value for value in strings
+            if value.lower() not in metadata and not value.isdigit()
+        ]
+        if candidates:
+            return max(candidates, key=len)
+        if strings:
+            return max(strings, key=len)
         return " ".join(str(value) for value in sample)
     return str(sample)
 
