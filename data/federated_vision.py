@@ -182,8 +182,11 @@ def make_cifar10_dirichlet(
     )
 
 
-def _leaf_json_files(root: Path) -> list[Path]:
-    candidates = [root, root / "data" / "train", root / "data" / "test", root / "train", root / "test"]
+def _leaf_json_files(root: Path, split: str | None = None) -> list[Path]:
+    if split is None:
+        candidates = [root, root / "data" / "train", root / "data" / "test", root / "train", root / "test"]
+    else:
+        candidates = [root / "data" / split, root / split]
     files: list[Path] = []
     for candidate in candidates:
         if candidate.exists():
@@ -197,7 +200,7 @@ def _leaf_json_files(root: Path) -> list[Path]:
     return deduped
 
 
-def _prepare_leaf_femnist(root: str) -> Path:
+def _prepare_leaf_femnist(root: str, preprocess_kind: str = "sample") -> Path:
     root_path = resolve_project_path(root)
     if _leaf_json_files(root_path):
         return root_path
@@ -234,11 +237,13 @@ def _prepare_leaf_femnist(root: str) -> Path:
             )
             data_to_json.write_text(text, encoding="utf-8")
 
+    if preprocess_kind not in {"sample", "full"}:
+        raise ValueError("preprocess_kind must be 'sample' or 'full'.")
     # LEAF FEMNIST uses writer identities as users under the non-IID split. The
-    # sample flag avoids forcing the full raw FEMNIST conversion before a smoke
-    # run; raise --femnist-clients if you need more writers than the sample has.
+    # FedMGDA+ paper protocol requires the full split; sample remains the default
+    # for smoke tests and lightweight local checks.
     subprocess.run(
-        [bash_path, str(preprocess.name), "-s", "niid", "--sf", "1.0", "-k", "0", "-t", "sample"],
+        [bash_path, str(preprocess.name), "-s", "niid", "--sf", "1.0", "-k", "0", "-t", preprocess_kind],
         cwd=str(femnist_dir),
         check=True,
     )
@@ -252,11 +257,16 @@ def _prepare_leaf_femnist(root: str) -> Path:
     )
 
 
-def _load_leaf_femnist_users(root: str, auto_prepare: bool = True) -> dict[str, tuple[list, list[int]]]:
+def _load_leaf_femnist_users(
+    root: str,
+    auto_prepare: bool = True,
+    split: str | None = None,
+    preprocess_kind: str = "sample",
+) -> dict[str, tuple[list, list[int]]]:
     root_path = resolve_project_path(root)
     if auto_prepare:
-        root_path = _prepare_leaf_femnist(root)
-    files = _leaf_json_files(root_path)
+        root_path = _prepare_leaf_femnist(root, preprocess_kind=preprocess_kind)
+    files = _leaf_json_files(root_path, split=split)
     if not files:
         raise FileNotFoundError(
             "Strict FEMNIST requires LEAF/FEMNIST writer JSON files. "
@@ -309,37 +319,76 @@ def make_femnist_writers(
     use_emnist_global_test: bool = True,
     auto_prepare: bool = True,
     apply_emnist_orientation_fix: bool = True,
+    use_leaf_train_test_split: bool = False,
+    leaf_preprocess_kind: str = "sample",
 ) -> VisionFederatedData:
     rng = random.Random(seed)
-    users = _load_leaf_femnist_users(leaf_root, auto_prepare=auto_prepare)
-    eligible = [user for user, (xs, ys) in users.items() if len(xs) >= min_samples_per_writer and len(xs) == len(ys)]
+    if use_leaf_train_test_split:
+        train_users = _load_leaf_femnist_users(
+            leaf_root,
+            auto_prepare=auto_prepare,
+            split="train",
+            preprocess_kind=leaf_preprocess_kind,
+        )
+        test_users = _load_leaf_femnist_users(
+            leaf_root,
+            auto_prepare=False,
+            split="test",
+            preprocess_kind=leaf_preprocess_kind,
+        )
+        eligible = [
+            user for user in sorted(set(train_users) & set(test_users))
+            if len(train_users[user][0]) >= min_samples_per_writer
+            and len(train_users[user][0]) == len(train_users[user][1])
+            and len(test_users[user][0]) == len(test_users[user][1])
+            and len(test_users[user][0]) > 0
+        ]
+        users = train_users
+    else:
+        users = _load_leaf_femnist_users(leaf_root, auto_prepare=auto_prepare, preprocess_kind=leaf_preprocess_kind)
+        eligible = [user for user, (xs, ys) in users.items() if len(xs) >= min_samples_per_writer and len(xs) == len(ys)]
     if len(eligible) < num_clients:
         raise RuntimeError(
             f"FEMNIST has only {len(eligible)} eligible writers, fewer than requested num_clients={num_clients}."
         )
-    rng.shuffle(eligible)
+    if num_clients < len(eligible):
+        rng.shuffle(eligible)
     selected = eligible[:num_clients]
 
     client_train = []
     client_test = []
     global_test_parts = []
     for client_id, user in enumerate(selected):
-        xs, ys = users[user]
-        indices = list(range(len(xs)))
-        if max_samples_per_writer is not None and len(indices) > max_samples_per_writer:
-            rng_user_cap = random.Random(seed * 917 + client_id)
-            indices = _cap_indices(indices, max_samples_per_writer, rng_user_cap)
-        train_indices, test_indices = _split_indices(indices, test_fraction, random.Random(seed * 1009 + client_id))
-        train_x = [xs[i] for i in train_indices]
-        train_y = [ys[i] for i in train_indices]
-        test_x = [xs[i] for i in test_indices]
-        test_y = [ys[i] for i in test_indices]
+        if use_leaf_train_test_split:
+            train_x, train_y = train_users[user]
+            test_x, test_y = test_users[user]
+            if max_samples_per_writer is not None and len(train_x) > max_samples_per_writer:
+                rng_user_cap = random.Random(seed * 917 + client_id)
+                train_indices = _cap_indices(list(range(len(train_x))), max_samples_per_writer, rng_user_cap)
+                train_x = [train_x[i] for i in train_indices]
+                train_y = [train_y[i] for i in train_indices]
+        else:
+            xs, ys = users[user]
+            indices = list(range(len(xs)))
+            if max_samples_per_writer is not None and len(indices) > max_samples_per_writer:
+                rng_user_cap = random.Random(seed * 917 + client_id)
+                indices = _cap_indices(indices, max_samples_per_writer, rng_user_cap)
+            train_indices, test_indices = _split_indices(indices, test_fraction, random.Random(seed * 1009 + client_id))
+            train_x = [xs[i] for i in train_indices]
+            train_y = [ys[i] for i in train_indices]
+            test_x = [xs[i] for i in test_indices]
+            test_y = [ys[i] for i in test_indices]
         client_train.append(_femnist_tensor_dataset(train_x, train_y, apply_emnist_orientation_fix))
         client_test_ds = _femnist_tensor_dataset(test_x, test_y, apply_emnist_orientation_fix)
         client_test.append(client_test_ds)
         global_test_parts.append(client_test_ds)
 
-    if use_emnist_global_test:
+    if use_leaf_train_test_split:
+        global_x = torch.cat([dataset.tensors[0] for dataset in global_test_parts], dim=0)
+        global_y = torch.cat([dataset.tensors[1] for dataset in global_test_parts], dim=0)
+        global_test_dataset = TensorDataset(global_x, global_y)
+        dataset_note = "leaf_femnist_writer_partition_original_train_test_split"
+    elif use_emnist_global_test:
         global_test_dataset: Dataset = _load_emnist_byclass_global_test(torchvision_root)
         dataset_note = "leaf_femnist_writer_partition_emnist_byclass_label_aligned_orientation_aligned_global_test"
     else:

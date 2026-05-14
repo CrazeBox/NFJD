@@ -6,7 +6,7 @@ This experiment tests the client-level multi-objective setting: each selected Sh
 
 The loader supports LEAF Shakespeare JSON, but the recommended path for this project is the custom LEAF-style construction from the Project Gutenberg raw text. The custom path keeps the same client semantics: each Shakespeare speaker/character is one federated client. It does not depend on LEAF's outdated Gutenberg preprocessing scripts.
 
-By default, the experiment resolves `data/shakespeare` relative to the repository root. If LEAF JSON files are empty or missing, `--shakespeare-source auto` falls back to custom raw-text construction.
+By default, the experiment resolves `data/shakespeare` relative to the repository root. If LEAF JSON files are empty or missing, `--shakespeare-source auto` falls back to custom raw-text construction. If `raw_data.txt` is also missing and automatic preparation is enabled, the loader downloads Project Gutenberg's complete Shakespeare text into `data/shakespeare/data/raw_data/raw_data.txt`.
 
 Custom construction:
 
@@ -33,7 +33,7 @@ The important controls are:
 --random-clients               Randomly select eligible clients instead of using the largest clients.
 ```
 
-Automatic preparation requires `git` and `bash` on the server. The script clones LEAF next to the data directory and runs LEAF's Shakespeare preprocessing:
+Automatic preparation first tries any existing LEAF JSON and then falls back to the raw-text path. It no longer clones or preprocesses LEAF unless `--shakespeare-source leaf` is passed explicitly:
 
 ```bash
 python fedjd/experiments/nfjd_phases/run_shakespeare_client_objectives.py \
@@ -55,7 +55,7 @@ python fedjd/experiments/nfjd_phases/run_shakespeare_client_objectives.py \
 
 ## Manual Preparation
 
-Use this if automatic setup fails because the server cannot access GitHub or does not have `bash`.
+Use this if the server cannot access the internet.
 
 1. Clone LEAF manually on a machine that has network access:
 
@@ -67,13 +67,19 @@ bash preprocess.sh -s niid --sf 1.0 -k 0 -t sample -tf 0.8
 
 2. Copy the generated Shakespeare directory to the server, or copy the JSON files into the project data directory.
 
-For the custom construction, you only need the raw text:
+For the recommended custom construction, you only need the raw text:
 
 ```text
 data/shakespeare/
   data/
     raw_data/
       raw_data.txt
+```
+
+Download source used by the automatic path:
+
+```text
+https://www.gutenberg.org/cache/epub/100/pg100.txt
 ```
 
 Accepted layouts include:

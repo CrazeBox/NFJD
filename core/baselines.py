@@ -66,6 +66,13 @@ def _round_objectives(server) -> list[float]:
     return server.evaluate_global_objectives()
 
 
+def _scheduled_update_scale(base_scale: float, decay: float | None, total_rounds: int | None, round_idx: int) -> float:
+    if decay is None or decay <= 0.0 or decay == 1.0 or total_rounds is None or total_rounds <= 1:
+        return base_scale
+    beta = decay ** (100.0 / max(float(total_rounds), 1.0))
+    return base_scale * (beta ** (round_idx // 100))
+
+
 def _clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     return {key: value.detach().clone() for key, value in model.state_dict().items()}
 
@@ -328,7 +335,9 @@ class FedMGDAPlusServer(FMGDAServer):
 
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, eval_dataset=None, aggregator=None,
-                 update_scale: float = 1.0, **kwargs):
+                 update_scale: float = 1.0, update_decay: float | None = None,
+                 total_rounds: int | None = None,
+                 normalize_client_updates: bool = False, **kwargs):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -338,6 +347,9 @@ class FedMGDAPlusServer(FMGDAServer):
         self.eval_dataset = eval_dataset
         self.aggregator = aggregator or MinNormAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0)
         self.update_scale = float(update_scale)
+        self.update_decay = update_decay
+        self.total_rounds = total_rounds
+        self.normalize_client_updates = normalize_client_updates
         self.evaluate_each_round = True
 
     def run_round(self, round_idx):
@@ -361,7 +373,12 @@ class FedMGDAPlusServer(FMGDAServer):
                 self.objective_fn,
                 compute_initial_loss=True,
             )
-            client_rows.append((-result.delta_theta).to(self.device))
+            row = (-result.delta_theta).to(self.device)
+            if self.normalize_client_updates:
+                row_norm = torch.norm(row, p=2)
+                if row_norm.item() > 1e-12:
+                    row = row / row_norm
+            client_rows.append(row)
             client_objectives.append(float(result.initial_loss))
             sampled_ids.append(result.client_id)
             total_upload += result.upload_bytes
@@ -384,7 +401,8 @@ class FedMGDAPlusServer(FMGDAServer):
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat - self.update_scale * direction
+        update_scale = _scheduled_update_scale(self.update_scale, self.update_decay, self.total_rounds, round_idx)
+        next_flat = current_flat - update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 
@@ -734,7 +752,7 @@ class QFedAvgServer:
     def __init__(self, model, clients, objective_fn, participation_rate,
                  learning_rate, device, eval_dataset=None, q: float = 0.5,
                  eps: float = 1e-12, update_scale: float = 1.0,
-                 mode: str = "official_delta"):
+                 mode: str = "official_delta", qffl_lipschitz: float | None = None):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -745,6 +763,7 @@ class QFedAvgServer:
         self.q = float(q)
         self.eps = eps
         self.update_scale = float(update_scale)
+        self.qffl_lipschitz = qffl_lipschitz
         if mode not in {"official_delta", "loss_weighted_delta"}:
             raise ValueError(f"Unknown qFedAvg mode: {mode}")
         self.mode = mode
@@ -789,7 +808,8 @@ class QFedAvgServer:
             grad_proxy = -delta / max(self.learning_rate, self.eps)
             grad_norm_sq = float(torch.dot(grad_proxy, grad_proxy).item())
             loss_q = loss ** self.q
-            h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + (1.0 / max(self.learning_rate, self.eps)) * loss_q
+            qffl_l = self.qffl_lipschitz if self.qffl_lipschitz is not None else (1.0 / max(self.learning_rate, self.eps))
+            h_i = self.q * (loss ** (self.q - 1.0)) * grad_norm_sq + qffl_l * loss_q
             if self.mode == "official_delta":
                 # q-FFL uses loss_q * grad_i divided by h_i. With FedAvg-style
                 # uploads, grad_i is approximated by -delta_i / local_lr.

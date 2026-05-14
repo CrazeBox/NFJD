@@ -27,7 +27,7 @@ from fedjd.data.celeba import make_celeba  # noqa: E402
 from fedjd.experiments.nfjd_phases.phase5_utils import build_trainer  # noqa: E402
 from fedjd.models.basic_cnn_mtl import BasicCNNMTL  # noqa: E402
 from fedjd.models.celeba_cnn import CelebaCNN  # noqa: E402
-from fedjd.models.femnist_cnn import FEMNISTCNN  # noqa: E402
+from fedjd.models.femnist_cnn import FEMNISTCNN, FedMGDAPlusFEMNISTCNN  # noqa: E402
 from fedjd.paths import resolve_project_path  # noqa: E402
 from fedjd.problems.classification import multi_task_binary_classification, multi_task_classification  # noqa: E402
 
@@ -36,7 +36,7 @@ DEFAULT_METHODS = ["fedavg", "qfedavg", "fedmgda_plus", "fedclient_upgrad"]
 SUMMARY_FIELDS = [
     "exp_id", "dataset", "dataset_note", "split", "method", "seed",
     "num_clients", "num_rounds", "local_epochs", "participation_rate", "learning_rate",
-    "mean_client_test_accuracy", "worst10_client_accuracy",
+    "mean_client_test_accuracy", "worst5_client_accuracy", "worst10_client_accuracy", "best5_client_accuracy",
     "client_accuracy_std", "mean_client_test_loss", "avg_round_time", "avg_upload_bytes",
     "avg_aggregation_compute_time", "max_aggregation_compute_time", "elapsed_time",
     "pareto2d_front_clients", "pareto3d_front_clients", "model_arch",
@@ -62,8 +62,10 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_model(dataset: str, num_classes: int):
+def build_model(dataset: str, num_classes: int, args: argparse.Namespace):
     if dataset == "femnist":
+        if args.femnist_model == "paper_fedmgda_plus":
+            return FedMGDAPlusFEMNISTCNN(num_tasks=1, num_classes=num_classes), "fedmgda_plus_table4_femnist_cnn"
         return FEMNISTCNN(num_tasks=1, num_classes=num_classes), "femnist_small_cnn"
     if dataset == "cifar10":
         return BasicCNNMTL(input_channels=3, num_tasks=1, num_classes=num_classes), "cifar_basic_cnn"
@@ -167,7 +169,9 @@ def evaluate_clients(
     losses = [float(row["test_loss"]) for row in rows]
     metrics = {
         "mean_client_test_accuracy": float(np.mean(accuracies)) if accuracies else math.nan,
+        "worst5_client_accuracy": bottom_fraction_mean(accuracies, 0.05),
         "worst10_client_accuracy": bottom_fraction_mean(accuracies, 0.1),
+        "best5_client_accuracy": bottom_fraction_mean([-value for value in accuracies], 0.05) * -1.0,
         "client_accuracy_std": float(np.std(accuracies)) if accuracies else math.nan,
         "mean_client_test_loss": float(np.mean(losses)) if losses else math.nan,
         "pareto2d_front_clients": int(mask2d.sum()),
@@ -556,6 +560,8 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
             use_emnist_global_test=not args.femnist_use_client_test_union_global,
             auto_prepare=not args.no_auto_prepare_femnist,
             apply_emnist_orientation_fix=not args.no_femnist_orientation_fix,
+            use_leaf_train_test_split=args.femnist_use_leaf_train_test_split,
+            leaf_preprocess_kind=args.femnist_leaf_preprocess_kind,
         )
         return "femnist", "writers", data
     if scenario == "celeba":
@@ -596,7 +602,7 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
 def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
     set_seed(args.seed)
     dataset_name, split_name, data = load_scenario(args, scenario)
-    model, model_arch = build_model(dataset_name, data.num_classes)
+    model, model_arch = build_model(dataset_name, data.num_classes, args)
     device = torch.device(args.device)
     model = model.to(device)
     exp_id = f"fv-{dataset_name}-{split_name}-{method}-seed{args.seed}"
@@ -615,12 +621,16 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         participation_rate=args.participation_rate,
         learning_rate=args.learning_rate,
         local_epochs=args.local_epochs,
+        local_batch_size=args.local_batch_size,
         eval_dataset=data.global_test_dataset,
         fedclient_update_scale=args.fedclient_update_scale,
         qfedavg_q=args.qfedavg_q,
         qfedavg_update_scale=args.qfedavg_update_scale,
+        qfedavg_lipschitz=args.qfedavg_lipschitz,
         qfedavg_mode=args.qfedavg_mode,
         fedmgda_plus_update_scale=args.fedmgda_plus_update_scale,
+        fedmgda_plus_update_decay=args.fedmgda_plus_update_decay,
+        fedmgda_plus_normalize_updates=args.fedmgda_plus_normalize_updates,
     )
     if hasattr(trainer.server, "evaluate_each_round"):
         trainer.server.evaluate_each_round = args.eval_interval > 0
@@ -691,11 +701,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--num-rounds", type=int, default=1000)
     parser.add_argument("--local-epochs", type=int, default=2)
+    parser.add_argument("--local-batch-size", type=int, default=256, help="Use <=0 for full local batch.")
     parser.add_argument("--participation-rate", type=float, default=0.5)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--client-test-fraction", type=float, default=0.2)
     parser.add_argument("--min-samples-per-client", type=int, default=20)
     parser.add_argument("--femnist-clients", type=int, default=50)
+    parser.add_argument("--femnist-paper-clients-per-round", type=int, default=10)
     parser.add_argument("--cifar-clients", type=int, default=50)
     parser.add_argument("--celeba-clients", type=int, default=50)
     parser.add_argument("--celeba-tasks", type=int, default=4)
@@ -709,21 +721,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--celeba-noniid", action="store_true")
     parser.add_argument("--no-femnist-orientation-fix", action="store_true")
     parser.add_argument("--femnist-use-client-test-union-global", action="store_true")
+    parser.add_argument("--femnist-use-leaf-train-test-split", action="store_true")
+    parser.add_argument("--femnist-leaf-preprocess-kind", choices=["sample", "full"], default="sample")
+    parser.add_argument("--femnist-model", choices=["small_cnn", "paper_fedmgda_plus"], default="small_cnn")
+    parser.add_argument("--fedmgda-paper-femnist-preset", action="store_true")
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--eval-interval", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="results/federated_vision")
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
     parser.add_argument("--fedmgda-plus-update-scale", type=float, default=1.0)
+    parser.add_argument("--fedmgda-plus-update-decay", type=float, default=None)
+    parser.add_argument("--fedmgda-plus-normalize-updates", action="store_true")
     parser.add_argument("--qfedavg-q", type=float, default=0.5)
     parser.add_argument("--qfedavg-update-scale", type=float, default=1.0)
+    parser.add_argument("--qfedavg-lipschitz", type=float, default=None)
     parser.add_argument("--qfedavg-mode", choices=["official_delta", "loss_weighted_delta"], default="official_delta")
     return parser.parse_args()
+
+
+def apply_fedmgda_paper_femnist_preset(args: argparse.Namespace) -> None:
+    if not args.fedmgda_paper_femnist_preset:
+        return
+    args.scenarios = ["femnist"]
+    args.femnist_model = "paper_fedmgda_plus"
+    args.femnist_use_leaf_train_test_split = True
+    args.femnist_use_client_test_union_global = True
+    args.femnist_leaf_preprocess_kind = "full"
+    args.min_samples_per_client = 1
+    if args.femnist_clients == 50:
+        args.femnist_clients = 3406
+    args.num_rounds = 1500
+    args.local_epochs = 1
+    args.local_batch_size = 0
+    args.learning_rate = 0.1
+    args.participation_rate = args.femnist_paper_clients_per_round / max(args.femnist_clients, 1)
+    args.qfedavg_q = 0.1
+    args.qfedavg_lipschitz = 0.1
+    args.qfedavg_mode = "official_delta"
+    args.fedmgda_plus_update_scale = 2.0
+    args.fedmgda_plus_update_decay = 0.2
+    args.fedmgda_plus_normalize_updates = True
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
+    apply_fedmgda_paper_femnist_preset(args)
     args.torchvision_root = str(resolve_project_path(args.torchvision_root))
     args.femnist_leaf_root = str(resolve_project_path(args.femnist_leaf_root))
     args.celeba_root = str(resolve_project_path(args.celeba_root))

@@ -6,6 +6,7 @@ import random
 import re
 import shutil
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,11 @@ _NON_SPEAKER_HEADINGS = {
 }
 _NON_DIALOGUE_MARKERS = (
     "PROJECT GUTENBERG", "START OF THE PROJECT", "END OF THE PROJECT", "CONTENTS", "THE COMPLETE WORKS",
+)
+_GUTENBERG_SHAKESPEARE_URLS = (
+    "https://www.gutenberg.org/cache/epub/100/pg100.txt",
+    "https://www.gutenberg.org/files/100/100-0.txt",
+    "https://www.gutenberg.org/files/100/100.txt",
 )
 
 
@@ -116,6 +122,26 @@ def _raw_text_candidates(root: Path) -> list[Path]:
         root / "data" / "raw_data.txt",
         root / "raw_data.txt",
     ]
+
+
+def _download_raw_text(root: Path) -> Path | None:
+    raw_path = root / "data" / "raw_data" / "raw_data.txt"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
+    for url in _GUTENBERG_SHAKESPEARE_URLS:
+        try:
+            logger.warning("Downloading Shakespeare raw text from %s", url)
+            urllib.request.urlretrieve(url, str(raw_path))
+            if raw_path.is_file() and raw_path.stat().st_size > 100_000:
+                return raw_path
+        except Exception as exc:  # pragma: no cover - network-dependent fallback
+            last_error = exc
+            logger.warning("Shakespeare raw text download failed from %s: %s", url, exc)
+    if raw_path.exists() and raw_path.stat().st_size == 0:
+        raw_path.unlink()
+    if last_error is not None:
+        logger.warning("All Shakespeare raw text download attempts failed: %s", last_error)
+    return None
 
 
 def _is_speaker_line(line: str) -> bool:
@@ -301,8 +327,15 @@ def _build_heading_style_users_from_text(text: str, sequence_length: int, stride
     return users
 
 
-def _load_raw_text_users(root: Path, sequence_length: int, stride: int) -> dict[str, tuple[list[str], list[str]]]:
+def _load_raw_text_users(
+    root: Path,
+    sequence_length: int,
+    stride: int,
+    auto_prepare: bool = True,
+) -> dict[str, tuple[list[str], list[str]]]:
     raw_path = next((path for path in _raw_text_candidates(root) if path.is_file()), None)
+    if raw_path is None and auto_prepare:
+        raw_path = _download_raw_text(root)
     if raw_path is None:
         return {}
 
@@ -358,10 +391,11 @@ def _load_shakespeare_users(
 
     if source in {"auto", "leaf"}:
         try:
-            users = _load_leaf_users(root, auto_prepare=auto_prepare)
-        except FileNotFoundError:
+            users = _load_leaf_users(root, auto_prepare=auto_prepare if source == "leaf" else False)
+        except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as exc:
             if source == "leaf":
                 raise
+            logger.warning("LEAF Shakespeare loading/preparation failed; falling back to raw text: %s", exc)
             users = {}
         if users:
             return users, "leaf_json"
@@ -369,7 +403,12 @@ def _load_shakespeare_users(
             raise RuntimeError("LEAF Shakespeare JSON files were found but contained zero usable clients.")
         logger.warning("LEAF Shakespeare JSON is empty or missing; falling back to custom raw-text construction.")
 
-    users = _load_raw_text_users(root, sequence_length=sequence_length, stride=stride)
+    users = _load_raw_text_users(
+        root,
+        sequence_length=sequence_length,
+        stride=stride,
+        auto_prepare=auto_prepare,
+    )
     if not users:
         raise FileNotFoundError(
             "Could not build Shakespeare clients. Provide LEAF JSON files or raw_data.txt under "
