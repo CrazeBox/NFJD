@@ -647,7 +647,8 @@ class FedClientUPGradServer:
                   learning_rate, device, eval_dataset=None, aggregator=None,
                   update_scale: float = 1.0, normalize_client_updates: bool = False,
                   upgrad_solver: str = "batched_pgd", upgrad_max_iters: int = 250,
-                  upgrad_lr: float = 0.1):
+                  upgrad_lr: float = 0.1, update_decay: float | None = None,
+                  total_rounds: int | None = None):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -662,6 +663,8 @@ class FedClientUPGradServer:
             solver=upgrad_solver,
         )
         self.update_scale = float(update_scale)
+        self.update_decay = update_decay
+        self.total_rounds = total_rounds
         self.normalize_client_updates = normalize_client_updates
         self.evaluate_each_round = True
 
@@ -723,7 +726,8 @@ class FedClientUPGradServer:
 
         update_start = time.time()
         current_flat = flatten_parameters(self.model.parameters())
-        next_flat = current_flat - self.update_scale * direction
+        update_scale = _scheduled_update_scale(self.update_scale, self.update_decay, self.total_rounds, round_idx)
+        next_flat = current_flat - update_scale * direction
         assign_flat_parameters(self.model.parameters(), next_flat)
         update_time = time.time() - update_start
 

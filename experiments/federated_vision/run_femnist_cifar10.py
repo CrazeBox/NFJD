@@ -641,6 +641,7 @@ def run_loaded_scenario(
         local_batch_size=args.local_batch_size,
         eval_dataset=data.global_test_dataset,
         fedclient_update_scale=args.fedclient_update_scale,
+        fedclient_update_decay=args.fedclient_update_decay,
         fedclient_normalize_updates=args.fedclient_normalize_updates,
         fedclient_upgrad_solver=args.fedclient_upgrad_solver,
         fedclient_upgrad_max_iters=args.fedclient_upgrad_max_iters,
@@ -761,6 +762,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="results/federated_vision")
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
+    parser.add_argument("--fedclient-update-decay", type=float, default=None)
     parser.add_argument("--fedclient-normalize-updates", action="store_true")
     parser.add_argument("--fedclient-upgrad-solver", choices=["auto", "active_set", "pgd", "batched_pgd"], default="batched_pgd")
     parser.add_argument("--fedclient-upgrad-max-iters", type=int, default=250)
