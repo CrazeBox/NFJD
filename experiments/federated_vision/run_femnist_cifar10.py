@@ -610,9 +610,15 @@ def load_scenario(args, scenario: str) -> tuple[str, str, VisionFederatedData]:
     raise ValueError(f"Unknown scenario: {scenario}")
 
 
-def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
+def run_loaded_scenario(
+    args,
+    dataset_name: str,
+    split_name: str,
+    data: VisionFederatedData,
+    method: str,
+    output_dir: Path,
+) -> dict:
     set_seed(args.seed)
-    dataset_name, split_name, data = load_scenario(args, scenario)
     model, model_arch = build_model(dataset_name, data.num_classes, args)
     device = torch.device(args.device)
     model = model.to(device)
@@ -697,6 +703,12 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
     row.update(client_metrics)
     row.update(history_metrics)
     return row
+
+
+def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
+    set_seed(args.seed)
+    dataset_name, split_name, data = load_scenario(args, scenario)
+    return run_loaded_scenario(args, dataset_name, split_name, data, method, output_dir)
 
 
 def write_summary(path: Path, rows: list[dict]) -> None:
@@ -835,8 +847,19 @@ def main() -> None:
     output_dir = resolve_project_path(args.output_dir)
     rows = []
     for scenario in args.scenarios:
+        set_seed(args.seed)
+        LOGGER.info("Loading scenario %s", scenario)
+        dataset_name, split_name, data = load_scenario(args, scenario)
+        LOGGER.info(
+            "Loaded %s/%s: clients=%d train_samples=%d test_samples=%d",
+            dataset_name,
+            split_name,
+            len(data.client_train_datasets),
+            sum(len(dataset) for dataset in data.client_train_datasets),
+            sum(len(dataset) for dataset in data.client_test_datasets),
+        )
         for method in args.methods:
-            rows.append(run_one(args, scenario, method, output_dir))
+            rows.append(run_loaded_scenario(args, dataset_name, split_name, data, method, output_dir))
             write_summary(output_dir / "summary.csv", rows)
             plot_method_pareto(output_dir, rows)
             plot_sorted_client_accuracy(output_dir, rows)
