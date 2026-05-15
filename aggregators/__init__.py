@@ -99,14 +99,18 @@ class MinNormAggregator(JacobianAggregator):
 class UPGradAggregator(JacobianAggregator):
     """UPGrad via the paper's Gramian-space dual formulation."""
 
+    _SOLVERS = {"auto", "active_set", "pgd", "batched_pgd"}
+
     def __init__(
         self,
         max_iters: int = 250,
         lr: float = 0.1,
         tol: float = 1e-6,
         max_direction_norm: float = 0.0,
-        solver: str = "auto",
+        solver: str = "pgd",
     ) -> None:
+        if solver not in self._SOLVERS:
+            raise ValueError(f"Unknown UPGrad solver: {solver}")
         self.max_iters = max_iters
         self.lr = lr
         self.tol = tol
@@ -160,10 +164,13 @@ class UPGradAggregator(JacobianAggregator):
         return best_solution
 
     def _solve_box_qp_pgd(self, gramian: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
-        current = lower_bound.clone()
         spectral_norm = torch.linalg.matrix_norm(gramian, ord=2)
         safe_step = 1.0 / (2.0 * spectral_norm + 1e-8)
         step_size = min(self.lr, float(safe_step.item())) if torch.isfinite(safe_step) else self.lr
+        return self._solve_box_qp_pgd_with_step(gramian, lower_bound, step_size)
+
+    def _solve_box_qp_pgd_with_step(self, gramian: torch.Tensor, lower_bound: torch.Tensor, step_size: float) -> torch.Tensor:
+        current = lower_bound.clone()
 
         with torch.no_grad():
             for _ in range(self.max_iters):
@@ -175,8 +182,24 @@ class UPGradAggregator(JacobianAggregator):
                 current = candidate
         return current
 
+    def _solve_box_qp_batched_pgd(self, gramian: torch.Tensor, lower_bounds: torch.Tensor) -> torch.Tensor:
+        current = lower_bounds.clone()
+        spectral_norm = torch.linalg.matrix_norm(gramian, ord=2)
+        safe_step = 1.0 / (2.0 * spectral_norm + 1e-8)
+        step_size = min(self.lr, float(safe_step.item())) if torch.isfinite(safe_step) else self.lr
+
+        with torch.no_grad():
+            for _ in range(self.max_iters):
+                gradient = 2.0 * (current @ gramian)
+                candidate = _project_lower_bound(current - step_size * gradient, lower_bounds)
+                if torch.norm(candidate - current, p="fro") <= self.tol:
+                    current = candidate
+                    break
+                current = candidate
+        return current
+
     def _solve_box_qp(self, gramian: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
-        use_active_set = self.solver in ("auto", "active_set")
+        use_active_set = self.solver == "active_set" or (self.solver == "auto" and gramian.shape[0] <= 3)
         if use_active_set:
             active_set_solution = self._solve_box_qp_active_set(gramian, lower_bound)
             if active_set_solution is not None:
@@ -202,12 +225,16 @@ class UPGradAggregator(JacobianAggregator):
             gramian = 0.5 * (gramian + gramian.T)
             lower_bounds = torch.eye(num_objectives, dtype=jacobian.dtype, device=jacobian.device)
 
-            solutions = []
-            for objective_idx in range(num_objectives):
-                lower_bound = lower_bounds[objective_idx]
-                solutions.append(self._solve_box_qp(gramian, lower_bound))
+            if self.solver == "batched_pgd":
+                solutions = self._solve_box_qp_batched_pgd(gramian, lower_bounds)
+            else:
+                solutions = []
+                for objective_idx in range(num_objectives):
+                    lower_bound = lower_bounds[objective_idx]
+                    solutions.append(self._solve_box_qp(gramian, lower_bound))
+                solutions = torch.stack(solutions, dim=0)
 
-            weights = torch.stack(solutions, dim=0).mean(dim=0)
+            weights = solutions.mean(dim=0)
             direction = jacobian.T @ weights
 
         if self.max_direction_norm > 0:

@@ -644,8 +644,10 @@ class FedClientUPGradServer:
     """
 
     def __init__(self, model, clients, objective_fn, participation_rate,
-                 learning_rate, device, eval_dataset=None, aggregator=None,
-                 update_scale: float = 1.0, normalize_client_updates: bool = False):
+                  learning_rate, device, eval_dataset=None, aggregator=None,
+                  update_scale: float = 1.0, normalize_client_updates: bool = False,
+                  upgrad_solver: str = "batched_pgd", upgrad_max_iters: int = 250,
+                  upgrad_lr: float = 0.1):
         self.model = model.to(device)
         self.clients = clients
         self.objective_fn = objective_fn
@@ -653,7 +655,12 @@ class FedClientUPGradServer:
         self.learning_rate = learning_rate
         self.device = device
         self.eval_dataset = eval_dataset
-        self.aggregator = aggregator or UPGradAggregator(max_iters=250, lr=0.1, max_direction_norm=0.0, solver="auto")
+        self.aggregator = aggregator or UPGradAggregator(
+            max_iters=upgrad_max_iters,
+            lr=upgrad_lr,
+            max_direction_norm=0.0,
+            solver=upgrad_solver,
+        )
         self.update_scale = float(update_scale)
         self.normalize_client_updates = normalize_client_updates
         self.evaluate_each_round = True

@@ -274,11 +274,14 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
                   fmgda_update_scale: float = 1.0,
                   fedmgda_plus_update_scale: float = 1.0,
                   fedmgda_plus_update_decay: float | None = None,
-                  fedmgda_plus_normalize_updates: bool = False,
-                  qfedavg_q: float = 0.5,
-                  qfedavg_update_scale: float = 1.0,
-                  qfedavg_lipschitz: float | None = None,
-                  qfedavg_mode: str = "official_delta"):
+                   fedmgda_plus_normalize_updates: bool = False,
+                   fedclient_upgrad_solver: str = "batched_pgd",
+                   fedclient_upgrad_max_iters: int = 250,
+                   fedclient_upgrad_lr: float = 0.1,
+                   qfedavg_q: float = 0.5,
+                   qfedavg_update_scale: float = 1.0,
+                   qfedavg_lipschitz: float | None = None,
+                   qfedavg_mode: str = "official_delta"):
     batch_size = local_batch_size if local_batch_size and local_batch_size > 0 else 1_000_000_000
     if method in NFJD_VARIANT_CONFIGS:
         cfg = NFJD_VARIANT_CONFIGS[method]
@@ -447,6 +450,9 @@ def build_trainer(method, model, client_datasets, objective_fn, m, seed,
             eval_dataset=eval_dataset,
             update_scale=fedclient_update_scale,
             normalize_client_updates=fedclient_normalize_updates,
+            upgrad_solver=fedclient_upgrad_solver,
+            upgrad_max_iters=fedclient_upgrad_max_iters,
+            upgrad_lr=fedclient_upgrad_lr,
         )
         return FedJDTrainer(server=server, num_rounds=num_rounds)
 
@@ -511,10 +517,13 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
                    eval_dataset=None, fedclient_update_scale: float = 1.0,
                    fedclient_normalize_updates: bool = False,
                    fmgda_update_scale: float = 1.0,
-                   fedmgda_plus_update_scale: float = 1.0,
-                   qfedavg_q: float = 0.5,
-                   qfedavg_update_scale: float = 1.0,
-                   qfedavg_mode: str = "official_delta"):
+                    fedmgda_plus_update_scale: float = 1.0,
+                    fedclient_upgrad_solver: str = "batched_pgd",
+                    fedclient_upgrad_max_iters: int = 250,
+                    fedclient_upgrad_lr: float = 0.1,
+                    qfedavg_q: float = 0.5,
+                    qfedavg_update_scale: float = 1.0,
+                    qfedavg_mode: str = "official_delta"):
 
     trainer = build_trainer(
         method=method, model=model, client_datasets=client_datasets,
@@ -526,6 +535,9 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         fedclient_normalize_updates=fedclient_normalize_updates,
         fmgda_update_scale=fmgda_update_scale,
         fedmgda_plus_update_scale=fedmgda_plus_update_scale,
+        fedclient_upgrad_solver=fedclient_upgrad_solver,
+        fedclient_upgrad_max_iters=fedclient_upgrad_max_iters,
+        fedclient_upgrad_lr=fedclient_upgrad_lr,
         qfedavg_q=qfedavg_q,
         qfedavg_update_scale=qfedavg_update_scale,
         qfedavg_mode=qfedavg_mode,
@@ -577,6 +589,9 @@ def run_experiment(exp_id, method, model, client_datasets, objective_fn, m, seed
         "avg_mse": "", "max_mse": "", "mse_std": "", "avg_r2": "",
         "fedclient_update_scale": fedclient_update_scale if method == "fedclient_upgrad" else "",
         "fedclient_normalize_updates": fedclient_normalize_updates if method == "fedclient_upgrad" else "",
+        "fedclient_upgrad_solver": fedclient_upgrad_solver if method == "fedclient_upgrad" else "",
+        "fedclient_upgrad_max_iters": fedclient_upgrad_max_iters if method == "fedclient_upgrad" else "",
+        "fedclient_upgrad_lr": fedclient_upgrad_lr if method == "fedclient_upgrad" else "",
         "fmgda_update_scale": fmgda_update_scale if method == "fmgda" else "",
         "fedmgda_plus_update_scale": fedmgda_plus_update_scale if method == "fedmgda_plus" else "",
         "qfedavg_q": qfedavg_q if method == "qfedavg" else "",

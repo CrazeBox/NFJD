@@ -635,6 +635,9 @@ def run_one(args, scenario: str, method: str, output_dir: Path) -> dict:
         local_batch_size=args.local_batch_size,
         eval_dataset=data.global_test_dataset,
         fedclient_update_scale=args.fedclient_update_scale,
+        fedclient_upgrad_solver=args.fedclient_upgrad_solver,
+        fedclient_upgrad_max_iters=args.fedclient_upgrad_max_iters,
+        fedclient_upgrad_lr=args.fedclient_upgrad_lr,
         qfedavg_q=args.qfedavg_q,
         qfedavg_update_scale=args.qfedavg_update_scale,
         qfedavg_lipschitz=args.qfedavg_lipschitz,
@@ -745,14 +748,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="results/federated_vision")
     parser.add_argument("--fedclient-update-scale", type=float, default=1.0)
+    parser.add_argument("--fedclient-upgrad-solver", choices=["auto", "active_set", "pgd", "batched_pgd"], default="batched_pgd")
+    parser.add_argument("--fedclient-upgrad-max-iters", type=int, default=250)
+    parser.add_argument("--fedclient-upgrad-lr", type=float, default=0.1)
     parser.add_argument("--fedmgda-plus-update-scale", type=float, default=1.0)
     parser.add_argument("--fedmgda-plus-update-decay", type=float, default=None)
     parser.add_argument("--fedmgda-plus-normalize-updates", action="store_true")
     parser.add_argument("--qfedavg-q", type=float, default=0.5)
-    parser.add_argument("--qfedavg-update-scale", type=float, default=1.0)
+    parser.add_argument("--qfedavg-update-scale", type=float, default=None)
     parser.add_argument("--qfedavg-lipschitz", type=float, default=None)
     parser.add_argument("--qfedavg-mode", choices=["official_delta", "loss_weighted_delta"], default="official_delta")
     return parser.parse_args()
+
+
+def apply_qfedavg_scale_default(args: argparse.Namespace) -> None:
+    if args.qfedavg_update_scale is None:
+        args.qfedavg_update_scale = args.learning_rate if args.qfedavg_mode == "official_delta" else 1.0
 
 
 def apply_fedmgda_paper_femnist_preset(args: argparse.Namespace) -> None:
@@ -817,6 +828,7 @@ def main() -> None:
     args = parse_args()
     apply_fedmgda_paper_femnist_preset(args)
     apply_fedmgda_paper_cifar10_preset(args)
+    apply_qfedavg_scale_default(args)
     args.torchvision_root = str(resolve_project_path(args.torchvision_root))
     args.femnist_leaf_root = str(resolve_project_path(args.femnist_leaf_root))
     args.celeba_root = str(resolve_project_path(args.celeba_root))
