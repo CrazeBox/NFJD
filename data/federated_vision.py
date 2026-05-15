@@ -261,6 +261,11 @@ def _prepare_leaf_femnist(root: str, preprocess_kind: str = "sample") -> Path:
     if _leaf_json_files(root_path):
         return root_path
 
+    leaf_repo = root_path.parent / "leaf"
+    femnist_dir = leaf_repo / "data" / "femnist"
+    if _leaf_json_files(femnist_dir):
+        return femnist_dir
+
     git_path = shutil.which("git")
     bash_path = shutil.which("bash")
     if git_path is None or bash_path is None:
@@ -270,14 +275,12 @@ def _prepare_leaf_femnist(root: str, preprocess_kind: str = "sample") -> Path:
         )
 
     root_path.parent.mkdir(parents=True, exist_ok=True)
-    leaf_repo = root_path.parent / "leaf"
     if not leaf_repo.exists():
         subprocess.run(
             [git_path, "clone", "--depth", "1", "https://github.com/TalwalkarLab/leaf.git", str(leaf_repo)],
             check=True,
         )
 
-    femnist_dir = leaf_repo / "data" / "femnist"
     preprocess = femnist_dir / "preprocess.sh"
     if not preprocess.exists():
         raise FileNotFoundError(f"LEAF FEMNIST preprocess script not found: {preprocess}")
@@ -295,11 +298,25 @@ def _prepare_leaf_femnist(root: str, preprocess_kind: str = "sample") -> Path:
 
     if preprocess_kind not in {"sample", "full"}:
         raise ValueError("preprocess_kind must be 'sample' or 'full'.")
-    # LEAF FEMNIST uses writer identities as users under the non-IID split. The
-    # FedMGDA+ paper protocol requires the full split; sample remains the default
-    # for smoke tests and lightweight local checks.
+    sample_fraction = "1.0" if preprocess_kind == "full" else "0.05"
+    # LEAF FEMNIST uses writer identities as users under the non-IID split. In
+    # LEAF's preprocess.sh, -t is the train/test split mode; use sample-level
+    # splitting with a 90/10 train/test fraction to match the FedMGDA+ counts.
     subprocess.run(
-        [bash_path, str(preprocess.name), "-s", "niid", "--sf", "1.0", "-k", "0", "-t", preprocess_kind],
+        [
+            bash_path,
+            str(preprocess.name),
+            "-s",
+            "niid",
+            "--sf",
+            sample_fraction,
+            "-k",
+            "0",
+            "-t",
+            "sample",
+            "--tf",
+            "0.9",
+        ],
         cwd=str(femnist_dir),
         check=True,
     )

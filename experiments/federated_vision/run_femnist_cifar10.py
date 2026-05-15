@@ -773,6 +773,7 @@ def apply_fedmgda_paper_femnist_preset(args: argparse.Namespace) -> None:
     args.participation_rate = args.femnist_paper_clients_per_round / max(args.femnist_clients, 1)
     args.qfedavg_q = 0.1
     args.qfedavg_lipschitz = 0.1
+    args.qfedavg_update_scale = args.learning_rate
     args.qfedavg_mode = "official_delta"
     args.fedmgda_plus_update_scale = 2.0
     args.fedmgda_plus_update_decay = 0.2
@@ -797,6 +798,7 @@ def apply_fedmgda_paper_cifar10_preset(args: argparse.Namespace) -> None:
         args.learning_rate = 0.01
         args.qfedavg_q = 0.5
         args.qfedavg_lipschitz = 1.0
+        args.qfedavg_update_scale = args.learning_rate
         args.fedmgda_plus_update_scale = 1.5
         args.fedmgda_plus_update_decay = 0.1
     else:
@@ -805,6 +807,7 @@ def apply_fedmgda_paper_cifar10_preset(args: argparse.Namespace) -> None:
         args.learning_rate = 0.1
         args.qfedavg_q = 0.1
         args.qfedavg_lipschitz = 0.1
+        args.qfedavg_update_scale = args.learning_rate
         args.fedmgda_plus_update_scale = 1.0
         args.fedmgda_plus_update_decay = 0.025
 
